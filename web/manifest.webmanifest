@@ -1,15 +1,18 @@
 {
   "id": "./",
-  "name": "Photographic Style Port",
-  "short_name": "Style Port",
-  "description": "Add iPhone 16-generation Photographic Styles and iOS 27 Texture/Grain to compatible HEIC photos entirely on your device.",
+  "name": "HoLanLa",
+  "short_name": "HoLanLa",
+  "description": "Add Photographic Styles and Texture/Grain to supported HEIC, PNG, JPEG, and WebP photos locally in your browser.",
   "lang": "en",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#2f6df6",
-  "categories": ["photo", "utilities"],
+  "categories": [
+    "photo",
+    "utilities"
+  ],
   "icons": [
     {
       "src": "icons/icon-192.png",

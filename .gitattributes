@@ -16,9 +16,6 @@
 .gitignore  text eol=lf
 .gitattributes text eol=lf
 
-# Shell wrapper must stay LF or /bin/sh will not run it.
-tools/heif-convert text eol=lf
-
 # Windows wrappers must stay CRLF or cmd.exe mis-parses them.
 *.cmd       text eol=crlf
 *.bat       text eol=crlf
@@ -36,7 +33,3 @@ tools/heif-convert text eol=lf
 *.mp4       binary
 *.mov       binary
 *.wasm      binary
-
-# Machine-generated: keep out of language stats and collapse in diffs.
-uv.lock         linguist-generated=true -diff
-requirements.txt linguist-generated=true

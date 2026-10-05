@@ -3,7 +3,7 @@
 
 import {
   boxes, topBox, metaChildren, findChild, u, be, box, concat, cstring, slice, bytesEqual,
-} from "./box.js";
+} from "./box.js?v=0.7.0";
 
 export const URI_HDR_GAIN = "urn:com:apple:photo:2020:aux:hdrgainmap";
 export const URI_LINEAR_THUMB = "tag:apple.com,2023:photo:aux:linearthumbnail";
@@ -79,6 +79,38 @@ export function extractItem(d, iloc, iid) {
   if (it.constructionMethod !== 0)
     throw new Error(`Item ${iid} uses construction_method=${it.constructionMethod}`);
   return concat(it.extents.map((e) => slice(d, it.baseOffset + e.offset, e.length)));
+}
+
+export function extractItemData(d, discovery, iid) {
+  const item = discovery.iloc.items.get(iid);
+  if (!item || item.constructionMethod === 0) return extractItem(d, discovery.iloc, iid);
+  if (item.constructionMethod !== 1) throw new Error(`Unsupported item construction method ${item.constructionMethod}`);
+  const idat = findChild(metaChildren(d, discovery.meta), "idat");
+  return concat(item.extents.map((extent) => {
+    const start = idat.off + idat.hdr + item.baseOffset + extent.offset;
+    if (start < idat.off + idat.hdr || start + extent.length > idat.off + idat.size)
+      throw new Error(`Item ${iid} exceeds idat`);
+    return d.slice(start, start + extent.length);
+  }));
+}
+
+/** Append replacement bytes so other idat items keep their relative offsets. */
+export function replaceIdatItem(meta, iid, payload) {
+  const m = topBox(meta, "meta"), iloc = parseIloc(meta, m);
+  const item = iloc.items.get(iid);
+  if (!item || item.constructionMethod !== 1 || item.extents.length !== 1)
+    throw new Error(`Item ${iid} is not a single idat extent`);
+  const children = metaChildren(meta, m), idat = findChild(children, "idat");
+  const offset = idat.size - idat.hdr - item.baseOffset;
+  if (offset < 0 || offset >= 2 ** (8 * iloc.offsetSize) || payload.length >= 2 ** (8 * iloc.lengthSize))
+    throw new Error(`Item ${iid} replacement exceeds iloc capacity`);
+  const updated = meta.slice(), extent = item.extents[0];
+  updated.set(be(offset, iloc.offsetSize), extent.offsetPos);
+  updated.set(be(payload.length, iloc.lengthSize), extent.lengthPos);
+  return box("meta", concat([updated.slice(m.off + m.hdr, m.off + m.hdr + 4),
+    ...children.map((child) => child.type === "idat"
+      ? box("idat", concat([updated.slice(child.off + child.hdr, child.off + child.size), payload]))
+      : updated.slice(child.off, child.off + child.size))]));
 }
 
 export function parseIinf(d, metaBox) {
@@ -201,12 +233,81 @@ export function imirAxisForItem(d, propinfo, iid) {
   return b ? (b[8] & 1) : null;
 }
 
+/** Equivalent mirror-then-rotate transform, composed in this item's ipma order.
+ * irot and imir do not commute at 90/270 degrees. Each image/auxiliary owns its
+ * own ordered associations; never infer their order from the ipco table. */
+export function itemOrientation(d, propinfo, iid) {
+  const rotations = [[1,0,0,1],[0,1,-1,0],[-1,0,0,-1],[0,-1,1,0]];
+  const multiply = (a,b) => [a[0]*b[0]+a[1]*b[2],a[0]*b[1]+a[1]*b[3],
+    a[2]*b[0]+a[3]*b[2],a[2]*b[1]+a[3]*b[3]];
+  const mirrors = [rotations[0],[1,0,0,-1],[-1,0,0,1]];
+  let matrix = rotations[0], turns = 0;
+  for (const association of propinfo.associations.get(iid) || []) {
+    const property = propinfo.properties[association.index - 1];
+    if (property?.type === "irot") {
+      const turn = d[property.box.off + property.box.hdr] & 3;
+      turns = (turns + turn) % 4; matrix = multiply(rotations[turn], matrix);
+    } else if (property?.type === "imir") {
+      const axis = d[property.box.off + property.box.hdr] & 1;
+      matrix = multiply(mirrors[axis + 1], matrix);
+    }
+  }
+  for (const turn of [turns,...[0,1,2,3].filter(t => t !== turns)]) {
+    for (const [index,mirror] of [null,0,1].entries()) {
+      if (multiply(rotations[turn],mirrors[index]).every((value,i) => value === matrix[i]))
+        return {angle:turn*90,mirror};
+    }
+  }
+  throw Error("Invalid HEIF image orientation");
+}
+
 export function displayDimensions(w, h, angle) {
   return (angle === 90 || angle === 270) ? [h, w] : [w, h];
 }
 
+/** Map normalized stored coordinates to display coordinates. Pass the canonical
+ * angle/mirror from itemOrientation(), which accounts for property order. */
+export function storedPointToDisplay(x, y, angle, mirror = null) {
+  if (mirror === 0) y = 1 - y;
+  else if (mirror === 1) x = 1 - x;
+  if (angle === 90) return { x: y, y: 1 - x };
+  if (angle === 180) return { x: 1 - x, y: 1 - y };
+  if (angle === 270) return { x: 1 - y, y: x };
+  return { x, y };
+}
+
+/** Inverse of storedPointToDisplay, used before writing display-space detections to HEIF. */
+export function displayPointToStored(x, y, angle, mirror = null) {
+  let stored;
+  if (angle === 90) stored = { x: 1 - y, y: x };
+  else if (angle === 180) stored = { x: 1 - x, y: 1 - y };
+  else if (angle === 270) stored = { x: y, y: 1 - x };
+  else stored = { x, y };
+  if (mirror === 0) stored.y = 1 - stored.y;
+  else if (mirror === 1) stored.x = 1 - stored.x;
+  return stored;
+}
+
+export function transformNormalizedRect(rect, pointTransform) {
+  const points = [pointTransform(rect.x, rect.y), pointTransform(rect.x + rect.width, rect.y),
+    pointTransform(rect.x, rect.y + rect.height),
+    pointTransform(rect.x + rect.width, rect.y + rect.height)];
+  const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
+  const x = Math.min(...xs), y = Math.min(...ys);
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+}
+
 export function findItemsByType(infos, type) {
   return [...infos.entries()].filter(([, v]) => v.type === type).map(([k]) => k).sort((a, b) => a - b);
+}
+
+/** Image inventory without requiring the transplant pipeline's primary grid layout. */
+export function discoverImageItems(d) {
+  const meta = topBox(d, "meta");
+  const children = metaChildren(d, meta);
+  return {meta, primary: parsePitm(d, meta), infos: parseIinf(d, meta),
+    iloc: parseIloc(d, meta), props: parseIpcoIpma(d, meta),
+    refs: children.some(child => child.type === "iref") ? parseIref(d, meta) : []};
 }
 
 export function discoverHeic(d) {
@@ -314,6 +415,65 @@ export function repointItemProperty(meta, iid, oldIndex, newIndex) {
   return out;
 }
 
+/** Add one existing ipco property to an item's ipma association list. */
+export function associateItemProperty(meta, iid, propertyIndex, essential = true) {
+  const props = parseIpcoIpma(meta, topBox(meta, "meta"));
+  const associations = (props.associations.get(iid) || []).map((a) => [a.index, a.essential]);
+  if (!associations.some(([index]) => index === propertyIndex))
+    associations.push([propertyIndex, essential]);
+  return setItemPropertyAssociations(meta, iid, associations);
+}
+
+/** Replace one item's associations without modifying properties shared by other items. */
+export function setItemPropertyAssociations(meta, iid, associations) {
+  const m = topBox(meta, "meta");
+  const props = parseIpcoIpma(meta, m);
+  const wasWide=Boolean(props.flags & 1), wide=wasWide || associations.some(([index])=>index>0x7f);
+  if(associations.length>255)throw new Error("Too many ipma associations");
+  const encodeAssociations=list=>concat(list.map(([index,essential])=>{
+    if(!Number.isInteger(index)||index<1||index>0x7fff)throw new Error(`Invalid property index ${index}`);
+    return be((essential?(wide?0x8000:0x80):0)|index,wide?2:1);
+  }));
+  const raw=encodeAssociations(associations);
+  const ipma = props.ipmaBox;
+  const body = ipma.off + ipma.hdr;
+  const iidSize = props.version === 0 ? 2 : 4;
+  const count = u(meta, body + 4, 4);
+  let p = body + 8;
+  const entries = [];
+  let found = false;
+  for (let n = 0; n < count; n++) {
+    const current = u(meta, p, iidSize);
+    const start = p;
+    p += iidSize;
+    const associationCount = meta[p++];
+    p += associationCount*(wasWide?2:1);
+    if (current === iid) {
+      found = true;
+      entries.push(concat([be(current, iidSize), new Uint8Array([associations.length]), raw]));
+    } else if(wide!==wasWide){
+      const list=(props.associations.get(current)||[]).map(a=>[a.index,a.essential]);
+      entries.push(concat([be(current,iidSize),new Uint8Array([list.length]),encodeAssociations(list)]));
+    }else entries.push(slice(meta, start, p - start));
+  }
+  if (!found) entries.push(concat([
+    be(iid, iidSize), new Uint8Array([associations.length]), raw,
+  ]));
+  const header = slice(meta, body, 8).slice();
+  if(wide)header[3]|=1;
+  if (!found) header.set(be(count + 1, 4), 4);
+  const newIpma = box("ipma", concat([header, ...entries]));
+  const iprp = props.iprpBox;
+  const parts = [];
+  for (const child of boxes(meta, iprp.off + iprp.hdr, iprp.off + iprp.size))
+    parts.push(child.type === "ipma" ? newIpma : slice(meta, child.off, child.size));
+  const newIprp = box("iprp", concat(parts));
+  const rebuilt = [slice(meta, m.off + m.hdr, 4)];
+  for (const child of boxes(meta, m.off + m.hdr + 4, m.off + m.size))
+    rebuilt.push(child.type === "iprp" ? newIprp : slice(meta, child.off, child.size));
+  return box("meta", concat(rebuilt));
+}
+
 // A 'mime' entry carries its content type, and a 'uri ' entry its URI, as a second
 // null-terminated string after the item name.
 const infeBox = (iid, itemType = "hvc1", contentType = null, name = "") => {
@@ -353,6 +513,148 @@ const ilocEntryV1 = (iid) => concat([
 
 export function ispeBox(w, h) {
   return box("ispe", concat([new Uint8Array(4), be(w, 4), be(h, 4)]));
+}
+
+/** Remove items and every reference/property-association entry that names them.
+ *
+ * Unused ipco properties and idat bytes are intentionally retained: property indices stay
+ * stable, which is required by donor manifests, while unreachable bytes are harmless.
+ */
+export function removeItems(meta, itemIds) {
+  const removed = itemIds instanceof Set ? itemIds : new Set(itemIds);
+  if (!removed.size) return meta;
+  const m = topBox(meta, "meta");
+  const mch = metaChildren(meta, m);
+
+  // iinf / infe
+  const iinf = findChild(mch, "iinf");
+  const iinfBody = iinf.off + iinf.hdr;
+  const iinfCountSize = meta[iinfBody] === 0 ? 2 : 4;
+  const infeStart = iinfBody + 4 + iinfCountSize;
+  const keptInfes = [];
+  for (const entry of boxes(meta, infeStart, iinf.off + iinf.size)) {
+    if (entry.type !== "infe") { keptInfes.push(slice(meta, entry.off, entry.size)); continue; }
+    const version = meta[entry.off + entry.hdr];
+    const iidSize = version === 2 ? 2 : version === 3 ? 4 : 0;
+    const iid = iidSize ? u(meta, entry.off + entry.hdr + 4, iidSize) : null;
+    if (iid === null || !removed.has(iid)) keptInfes.push(slice(meta, entry.off, entry.size));
+  }
+  const iinfPrefix = slice(meta, iinfBody, 4 + iinfCountSize).slice();
+  iinfPrefix.set(be(keptInfes.length, iinfCountSize), 4);
+  const newIinf = box("iinf", concat([iinfPrefix, ...keptInfes]));
+
+  // iloc entries are variable length, so walk them exactly as parseIloc does.
+  const ilocBox = findChild(mch, "iloc");
+  let p = ilocBox.off + ilocBox.hdr;
+  const ilocVersion = meta[p];
+  p += 4;
+  const a = meta[p], b = meta[p + 1];
+  p += 2;
+  const offsetSize = a >> 4, lengthSize = a & 0x0f, baseOffsetSize = b >> 4;
+  const indexSize = (ilocVersion === 1 || ilocVersion === 2) ? (b & 0x0f) : 0;
+  const ilocCountSize = ilocVersion < 2 ? 2 : 4;
+  const ilocCount = u(meta, p, ilocCountSize);
+  p += ilocCountSize;
+  const ilocEntriesStart = p;
+  const keptIlocs = [];
+  for (let n = 0; n < ilocCount; n++) {
+    const start = p;
+    const iidSize = ilocVersion < 2 ? 2 : 4;
+    const iid = u(meta, p, iidSize);
+    p += iidSize;
+    if (ilocVersion === 1 || ilocVersion === 2) p += 2;
+    p += 2 + baseOffsetSize;
+    const extentCount = u(meta, p, 2);
+    p += 2;
+    p += extentCount * (indexSize + offsetSize + lengthSize);
+    if (!removed.has(iid)) keptIlocs.push(slice(meta, start, p - start));
+  }
+  const ilocPrefix = slice(meta, ilocBox.off + ilocBox.hdr,
+    ilocEntriesStart - (ilocBox.off + ilocBox.hdr)).slice();
+  ilocPrefix.set(be(keptIlocs.length, ilocCountSize), 6);
+  const newIloc = box("iloc", concat([ilocPrefix, ...keptIlocs]));
+
+  // iref: drop references from removed items and remove removed targets from survivors.
+  const iref = findChild(mch, "iref");
+  const irefBody = iref.off + iref.hdr;
+  const irefVersion = meta[irefBody];
+  const refIidSize = irefVersion === 0 ? 2 : 4;
+  const keptRefs = [];
+  for (const ref of boxes(meta, irefBody + 4, iref.off + iref.size)) {
+    let q = ref.off + ref.hdr;
+    const from = u(meta, q, refIidSize);
+    q += refIidSize;
+    const count = u(meta, q, 2);
+    q += 2;
+    const to = [];
+    for (let n = 0; n < count; n++) { to.push(u(meta, q, refIidSize)); q += refIidSize; }
+    const filtered = to.filter((iid) => !removed.has(iid));
+    if (!removed.has(from) && filtered.length)
+      keptRefs.push(box(ref.type, concat([
+        be(from, refIidSize), be(filtered.length, 2),
+        ...filtered.map((iid) => be(iid, refIidSize)),
+      ])));
+  }
+  const newIref = box("iref", concat([slice(meta, irefBody, 4), ...keptRefs]));
+
+  // ipma: discard the removed items' association records; ipco itself stays unchanged.
+  const props = parseIpcoIpma(meta, m);
+  const ipma = props.ipmaBox;
+  p = ipma.off + ipma.hdr;
+  const ipmaVersion = meta[p];
+  const ipmaFlags = u(meta, p + 1, 3);
+  p += 4;
+  const ipmaCount = u(meta, p, 4);
+  p += 4;
+  const ipmaEntriesStart = p;
+  const keptIpmas = [];
+  for (let n = 0; n < ipmaCount; n++) {
+    const start = p;
+    const iidSize = ipmaVersion === 0 ? 2 : 4;
+    const iid = u(meta, p, iidSize);
+    p += iidSize;
+    const associationCount = meta[p++];
+    p += associationCount * ((ipmaFlags & 1) ? 2 : 1);
+    if (!removed.has(iid)) keptIpmas.push(slice(meta, start, p - start));
+  }
+  const ipmaPrefix = slice(meta, ipma.off + ipma.hdr,
+    ipmaEntriesStart - (ipma.off + ipma.hdr)).slice();
+  ipmaPrefix.set(be(keptIpmas.length, 4), 4);
+  const newIpma = box("ipma", concat([ipmaPrefix, ...keptIpmas]));
+  const iprp = props.iprpBox;
+  const iprpParts = [];
+  for (const child of boxes(meta, iprp.off + iprp.hdr, iprp.off + iprp.size))
+    iprpParts.push(child.type === "ipma" ? newIpma : slice(meta, child.off, child.size));
+  const newIprp = box("iprp", concat(iprpParts));
+
+  const replacements = { iinf: newIinf, iloc: newIloc, iref: newIref, iprp: newIprp };
+  const rebuilt = [slice(meta, m.off + m.hdr, 4)];
+  for (const child of boxes(meta, m.off + m.hdr + 4, m.off + m.size))
+    rebuilt.push(replacements[child.type] || slice(meta, child.off, child.size));
+  return box("meta", concat(rebuilt));
+}
+
+/** Replace or append one outgoing iref relationship while preserving every other reference. */
+export function setItemReference(meta, type, from, toIds) {
+  const m = topBox(meta, "meta");
+  const mch = metaChildren(meta, m);
+  const iref = findChild(mch, "iref");
+  const body = iref.off + iref.hdr;
+  const version = meta[body];
+  const iidSize = version === 0 ? 2 : 4;
+  const refs = [];
+  for (const ref of boxes(meta, body + 4, iref.off + iref.size)) {
+    const refFrom = u(meta, ref.off + ref.hdr, iidSize);
+    if (ref.type !== type || refFrom !== from) refs.push(slice(meta, ref.off, ref.size));
+  }
+  if (toIds.length) refs.push(box(type, concat([
+    be(from, iidSize), be(toIds.length, 2), ...toIds.map((iid) => be(iid, iidSize)),
+  ])));
+  const newIref = box("iref", concat([slice(meta, body, 4), ...refs]));
+  const rebuilt = [slice(meta, m.off + m.hdr, 4)];
+  for (const child of boxes(meta, m.off + m.hdr + 4, m.off + m.size))
+    rebuilt.push(child.type === "iref" ? newIref : slice(meta, child.off, child.size));
+  return box("meta", concat(rebuilt));
 }
 
 /** Append new items (auxiliary images or mime sidecars) to the item graph. */

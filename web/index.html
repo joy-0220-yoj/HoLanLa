@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Photographic Style Port</title>
+<title>HoLanLa</title>
 <meta name="description" content="Adds the iPhone 16-generation Photographic Styles palette to HEIC photos from iPhones before the iPhone 16, plus the iOS 27 Texture and Grain controls. Runs entirely in your browser — photos are never uploaded.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="Style Port">
-<meta property="og:title" content="Photographic Style Port">
+<meta name="apple-mobile-web-app-title" content="HoLanLa">
+<meta property="og:title" content="HoLanLa">
 <meta property="og:description" content="Adds iPhone 16-generation Photographic Styles and iOS 27 Texture/Grain to HEIC photos from older iPhones, entirely in your browser.">
 <meta property="og:type" content="website">
 <link rel="manifest" href="manifest.webmanifest">
@@ -21,6 +21,7 @@
   :root {
     --bg: #ffffff; --fg: #16181d; --muted: #5b6270; --line: #e3e6ec;
     --panel: #f7f8fa; --accent: #2f6df6; --ok: #0f7b4f; --err: #b3261e;
+    --ribbon-bg: #000000; --ribbon-fg: #ffffff;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
             "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
             "Noto Sans SC", sans-serif;
@@ -29,11 +30,13 @@
     :root:not([data-theme="light"]) {
       --bg: #14161a; --fg: #e8eaef; --muted: #9aa2b1; --line: #2a2e37;
       --panel: #1b1e24; --accent: #6f9bff; --ok: #4ac68b; --err: #ff8a80;
+      --ribbon-bg: #ffffff; --ribbon-fg: #000000;
     }
   }
   :root[data-theme="dark"] {
     --bg: #14161a; --fg: #e8eaef; --muted: #9aa2b1; --line: #2a2e37;
     --panel: #1b1e24; --accent: #6f9bff; --ok: #4ac68b; --err: #ff8a80;
+    --ribbon-bg: #ffffff; --ribbon-fg: #000000;
   }
   * { box-sizing: border-box; }
   body {
@@ -42,6 +45,27 @@
     padding: 2.5rem 1.25rem 4rem;
   }
   main { max-width: 46rem; margin: 0 auto; }
+  .github-ribbon {
+    position: absolute; top: 0; right: 0; width: 150px; height: 150px;
+    overflow: hidden; pointer-events: none; z-index: 10;
+  }
+  .github-ribbon a {
+    position: absolute; top: 42px; right: -43px; width: 200px;
+    transform: rotate(45deg); padding: 6px 0; pointer-events: auto;
+    background: var(--ribbon-bg); color: var(--ribbon-fg);
+    font-size: 13px; font-weight: 700; line-height: 20px;
+    text-align: center; text-decoration: none;
+    box-shadow: 0 2px 4px #0003;
+  }
+  .github-ribbon a::before {
+    content: ""; position: absolute; inset: 3px 0;
+    border-block: 1px dashed currentColor; opacity: .5; pointer-events: none;
+  }
+  .github-ribbon a:hover { text-decoration: underline; }
+  .github-ribbon a:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  @media (max-width: 1040px) {
+    body { padding-top: 6.5rem; }
+  }
   .top { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
   h1 { font-size: 1.6rem; margin: 0 0 .3rem; letter-spacing: -.02em; text-wrap: balance; }
   #lang {
@@ -63,17 +87,45 @@
   input[type=file] { display: none; }
   .opts { margin: 1rem 0 0; display: flex; align-items: flex-start; gap: .55rem; }
   .opts label { color: var(--muted); font-size: .9rem; }
+  .codec-fallback { flex-basis: 100%; overflow-wrap: anywhere; }
+  .codec-error { display: block; color: var(--err); overflow-wrap: anywhere; }
+  .opts + .portrait-hint { margin-top: 1rem; font-size: .9rem; }
+  [hidden] { display: none !important; }
   #list { margin-top: 1.5rem; display: flex; flex-direction: column; gap: .5rem; }
   .row {
     display: grid; grid-template-columns: minmax(0,1fr) auto; gap: .25rem 1rem;
     align-items: center; padding: .7rem .9rem; border: 1px solid var(--line);
     border-radius: 9px; background: var(--panel);
   }
-  .row .name { font-weight: 600; overflow-wrap: anywhere; }
-  .row .status { grid-column: 1; color: var(--muted); font-size: .87rem; overflow-wrap: anywhere; }
-  .row .status.ok { color: var(--ok); }
-  .row .status.err { color: var(--err); }
-  .row .act { grid-row: 1 / span 2; display: flex; flex-direction: column; gap: .35rem; }
+  .row { min-width: 0; }
+  .row > .file-heading { grid-column: 1 / -1; grid-row: 1; min-width: 0; overflow-wrap: anywhere; }
+  .file-heading .name { font-weight: 600; }
+  .jpeg-hint { margin: .25rem 0 0; color: var(--muted); font-size: .85rem; }
+  .encoder-progress { grid-column: 1 / -1; grid-row: 5; width: 100%; height: .65rem; accent-color: var(--accent); }
+  .row > .status { grid-column: 1 / -1; grid-row: 6; min-width: 0; max-height: 16rem; overflow-y: auto;
+                 display: flex; flex-direction: column; gap: .14rem; overflow-anchor: none;
+                 font-size: .87rem; overflow-wrap: anywhere; }
+  .status-line { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: .45rem;
+                 color: var(--muted); }
+  .status-line.ok { color: var(--ok); }
+  .status-line.err { color: var(--err); }
+  .status-codecs { display: flex; flex-wrap: wrap; gap: .15rem .8rem; margin-top: .15rem;
+                   color: var(--muted); font-size: .8rem; }
+  .inspection-codecs { grid-column: 1 / -1; }
+  .status-total { display: block; margin-top: .15rem; font-weight: 600; }
+  .status-total-value { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .status-time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .status-time::before { content: "["; }
+  .status-time::after { content: "]"; }
+  .row > .act { grid-column: 1 / -1; grid-row: 4; min-width: 0; display: flex; flex-wrap: wrap; gap: .35rem; }
+  @media (max-width: 600px) {
+    .row { grid-template-columns: minmax(0, 1fr); gap: .6rem; }
+    .row > .act .dl { width: 100%; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  }
+  .diag-copy {
+    margin-top: .55rem; padding: .3rem .65rem; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--panel); color: var(--accent); font: inherit; font-size: .8rem; cursor: pointer;
+  }
   .dl {
     display: inline-block; padding: .4rem .8rem; border-radius: 7px; border: 1px solid transparent;
     background: var(--accent); color: #fff; text-decoration: none; font: inherit;
@@ -81,6 +133,110 @@
   }
   .dl.alt { background: transparent; color: var(--accent); border-color: var(--line); }
   .dl.alt:hover { border-color: var(--accent); }
+  .preview {
+    position: fixed; inset: 0; z-index: 1000; padding: max(1rem, env(safe-area-inset-top)) 1rem
+      max(1rem, env(safe-area-inset-bottom)); background: rgba(0, 0, 0, .82);
+    display: grid; place-items: center;
+  }
+  .preview[hidden] { display: none; }
+  .preview-card {
+    width: min(100%, 46rem); max-height: 100%; overflow: auto; background: var(--bg);
+    border-radius: 12px; padding: .9rem; box-shadow: 0 18px 60px rgba(0, 0, 0, .4);
+  }
+  .preview-head { display: flex; justify-content: space-between; gap: 1rem; align-items: start; }
+  .preview-head strong { overflow-wrap: anywhere; }
+  .preview-close {
+    border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--fg);
+    padding: .35rem .7rem; font: inherit; font-weight: 600; cursor: pointer; flex: none;
+  }
+  .preview-hint { color: var(--muted); font-size: .9rem; margin: .5rem 0 .8rem; }
+  .thumbnails { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+                align-items: start; gap: 1rem; min-height: 10rem; }
+  .thumbnail { margin: .5rem 0 0; width: 7rem; max-width: 100%; }
+  .thumbnail img, .thumbnail canvas { display: block; width: auto; max-width: 100%; height: auto;
+    max-height: 7rem; object-fit: contain; border-radius: 7px; -webkit-touch-callout: default; }
+  .thumbnail figcaption { margin-top: .3rem; color: var(--muted); font-size: .78rem; overflow-wrap: anywhere; }
+  .face-summary { grid-column: 1 / -1; grid-row: 3; margin: .25rem 0 0; color: var(--muted); font-size: .85rem; }
+  .portrait-result-note { grid-column: 1 / -1; grid-row: 7; min-width: 0; color: var(--muted); font-size: .85rem; }
+  .model-cache { margin-top: 1rem; border: 1px solid var(--line); border-radius: 9px; padding: .7rem .9rem; }
+  .model-cache summary { cursor: pointer; font-weight: 600; }
+  .model-cache p { color: var(--muted); font-size: .85rem; }
+  .model-cache-files { list-style: none; padding: 0; margin: .7rem 0; }
+  .model-cache-files li { display: flex; align-items: center; gap: .7rem; padding: .6rem 0; border-bottom: 1px solid var(--line); }
+  .model-cache-files li > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .model-cache-files strong, .model-cache-files span { display: block; font-size: .85rem; }
+  .model-cache-files span { margin-top: .2rem; color: var(--muted); }
+  .model-cache-files button { flex: none; }
+  .face-card { display: flex; flex-direction: column; width: min(100%, 52rem); }
+  .face-viewport { overflow: auto; max-height: 52dvh; min-height: 0; border-radius: 8px; background: #111;
+                   touch-action: pan-x pan-y pinch-zoom; }
+  .face-stage { position: relative; }
+  .face-stage > canvas { display: block; width: 100%; height: auto; }
+  .face-box { position: absolute; border: 3px solid #2f6df6; background: transparent; cursor: pointer;
+              padding: 0; border-radius: 4px; }
+  .face-box span { position: absolute; left: -3px; top: -1.45rem; color: #fff; background: #2f6df6;
+                   padding: 0 .3rem; border-radius: 3px; font: 600 .85rem var(--sans); }
+  .face-box[data-excluded="true"] { border-color: #8f949b; border-style: dashed; background: #6663; }
+  .face-box[data-excluded="true"] span { background: #5b6270; }
+  .face-zoom { display: flex; align-items: center; justify-content: end; gap: .6rem; margin: .5rem 0; }
+  .face-zoom button { min-width: 44px; min-height: 44px; }
+  .face-choices { display: flex; gap: .6rem; overflow-x: auto; padding: .65rem .15rem; flex-shrink: 0; }
+  .face-choice { flex: 0 0 6.2rem; border: 2px solid var(--accent); border-radius: 8px; padding: .2rem;
+                 background: var(--panel); color: var(--fg); font: inherit; cursor: pointer; }
+  .face-choice canvas { display: block; width: 100%; height: auto; border-radius: 4px; }
+  .face-choice span { display: block; font-size: .8rem; }
+  .face-choice[data-excluded="true"] { border-color: var(--muted); border-style: dashed; }
+  .face-choice[data-excluded="true"] canvas { opacity: .45; filter: grayscale(1); }
+  .face-box:focus-visible, .face-choice:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .face-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: end; gap: .6rem;
+                 padding-top: .6rem; border-top: 1px solid var(--line); }
+  .face-footer > p { margin: 0 auto 0 0; font-size: .85rem; }
+  .face-footer button { min-height: 44px; }
+  button:disabled { opacity: .5; cursor: default; }
+  @media (max-width: 600px) {
+    .face-footer > p { flex-basis: 100%; }
+    .face-footer button { flex: 1; white-space: normal; }
+    .face-footer #face-cancel { flex: 0 0 auto; }
+    .face-card .preview-hint { font-size: .82rem; }
+    .face-viewport { max-height: 40dvh; }
+  }
+  .inspection-card { min-width: 0; width: min(100%, 64rem); max-width: 100%; }
+  .comparison-overlay { margin: .8rem 0; }
+  .comparison-overlay summary { color: var(--accent); cursor: pointer; font-weight: 600; }
+  .comparison-overlay img { display: block; width: 100%; max-height: 65dvh;
+    object-fit: contain; background: #000; border-radius: 8px; margin: .5rem 0; }
+  .inspection-grid {
+    display: grid; grid-template-columns: minmax(10rem, .8fr) repeat(2, minmax(0, 1fr));
+    gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px;
+    overflow: hidden; margin-top: .8rem;
+  }
+  .inspection-head, .inspection-name, .inspection-cell { background: var(--bg); padding: .55rem; }
+  .inspection-head { font-weight: 700; position: sticky; top: 0; z-index: 1; }
+  .inspection-name { font-family: inherit;
+                     font-size: .78rem; overflow-wrap: anywhere; }
+  .inspection-identifier { display: block; margin-top: .2rem; color: var(--muted); font-size: .72rem;
+                           overflow-wrap: anywhere; }
+  .inspection-cell { min-width: 0; font-size: .78rem; }
+  .inspection-cell.missing { color: var(--muted); }
+  .inspection-badge { color: var(--ok); margin-bottom: .35rem; overflow-wrap: anywhere; }
+  .inspection-cell img { display: block; width: 100%; height: auto; margin: .35rem 0;
+                         background: #000; border-radius: 5px; }
+  .inspection-cell small { display: block; }
+  .inspection-comparison-hint { grid-column: 1 / -1; background: var(--bg); padding: .7rem; font-size: .8rem; color: var(--muted); }
+  .inspection-match { display: block; margin-top: .5rem; font-family: system-ui, sans-serif; font-weight: 600; }
+  .inspection-match.same { color: var(--ok); }
+  .inspection-match.different, .inspection-match.removed, .inspection-match.orderOnly { color: var(--accent); }
+  .inspection-differences { margin-top: .4rem; font-family: system-ui, sans-serif; font-size: .75rem; }
+  .inspection-differences summary { cursor: pointer; color: var(--accent); overflow-wrap: anywhere; }
+  .inspection-differences details { margin: .5rem 0; }
+  .inspection-differences pre { max-height: 12rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .7rem; }
+  .inspection-cell summary { color: var(--accent); cursor: pointer; }
+  .inspection-cell pre { max-height: 15rem; overflow: auto; white-space: pre-wrap;
+                         overflow-wrap: anywhere; font-size: .7rem; }
+  @media (max-width: 700px) {
+    .inspection-grid { grid-template-columns: minmax(6.5rem, .65fr) repeat(2, minmax(8.5rem, 1fr));
+                       overflow-x: auto; }
+  }
   .notes { margin-top: 2.5rem; border-top: 1px solid var(--line); padding-top: 1.25rem;
            color: var(--muted); font-size: .875rem; }
   .notes h2 { font-size: .95rem; color: var(--fg); margin: 1.25rem 0 .4rem; }
@@ -92,10 +248,13 @@
 </style>
 </head>
 <body>
+<div class="github-ribbon">
+  <a href="https://github.com/joy-0220-yoj/HoLanLa" target="_blank" rel="noopener noreferrer">Fork me on GitHub</a>
+</div>
 <main>
   <div class="top">
-    <h1 data-i18n="meta.title">Photographic Style Port</h1>
-    <button id="lang" type="button" data-i18n="lang.name">中文</button>
+    <h1 data-i18n="meta.title">HoLanLa</h1>
+    <button id="lang" type="button" data-i18n="lang.name">繁體中文</button>
   </div>
   <p class="sub" data-i18n="app.lede"></p>
 
@@ -104,12 +263,25 @@
     <span data-i18n="drop.small"></span>
   </div>
   <input type="file" id="file" multiple
-         accept="image/heic,image/heif,.heic,.heif">
+         accept="image/heic,image/heif,image/png,image/jpeg,image/webp,.heic,.heif,.png,.jpg,.jpeg,.webp">
 
   <div class="opts">
     <input type="checkbox" id="quality" checked>
     <label for="quality" data-i18n="opt.quality"></label>
   </div>
+  <div class="opts">
+    <input type="checkbox" id="faces" checked>
+    <label for="faces" data-i18n="opt.faces"></label>
+  </div>
+  <p class="sub portrait-hint" data-i18n="portrait.hint"></p>
+
+  <details id="model-cache" class="model-cache">
+    <summary data-i18n="cache.title"></summary>
+    <p data-i18n="cache.hint"></p>
+    <ul id="model-cache-files" class="model-cache-files"></ul>
+    <button id="model-cache-clear" type="button" class="dl alt" data-i18n="cache.deleteAll" disabled></button>
+    <p id="model-cache-status" role="status" aria-live="polite"></p>
+  </details>
 
   <div id="list"></div>
   <p id="boot"></p>
@@ -139,6 +311,46 @@
     <p><span data-i18n="p.version"></span> <span id="version"></span></p>
   </div>
 </main>
-<script type="module" src="app.js"></script>
+<div id="compare-preview" class="preview" hidden role="dialog" aria-modal="true"
+     aria-labelledby="compare-name">
+  <div class="preview-card inspection-card">
+    <div class="preview-head">
+      <strong id="compare-name"></strong>
+      <button id="compare-close" class="preview-close" type="button" data-i18n="btn.close"></button>
+    </div>
+    <p class="preview-hint" data-i18n="inspect.hint"></p>
+    <details id="comparison-overlay" class="comparison-overlay" hidden>
+      <summary data-i18n="inspect.overlayTitle"></summary>
+      <p class="preview-hint" data-i18n="inspect.overlayHint"></p>
+      <img id="comparison-overlay-image" alt="">
+      <a id="comparison-overlay-download" class="dl alt" data-i18n="btn.debugDownload"></a>
+    </details>
+    <div id="compare-grid" class="inspection-grid"></div>
+  </div>
+</div>
+<div id="face-preview" class="preview" hidden role="dialog" aria-modal="true"
+     aria-labelledby="face-name" aria-describedby="face-hint">
+  <div class="preview-card face-card">
+    <div class="preview-head">
+      <strong id="face-name"></strong>
+      <button id="face-close" class="preview-close" type="button" data-i18n="btn.close"></button>
+    </div>
+    <p id="face-hint" class="preview-hint" data-i18n="review.hint"></p>
+    <div id="face-viewport" class="face-viewport"><div id="face-stage" class="face-stage"></div></div>
+    <div class="face-zoom">
+      <span data-i18n="review.zoom"></span>
+      <button id="face-zoom-out" type="button" class="dl alt" data-i18n="review.zoomOut"></button>
+      <span id="face-zoom-value">100%</span>
+      <button id="face-zoom-in" type="button" class="dl alt" data-i18n="review.zoomIn"></button>
+    </div>
+    <div id="face-choices" class="face-choices" role="group" aria-labelledby="face-name"></div>
+    <div class="face-footer">
+      <p id="face-counts" aria-live="polite"></p>
+      <button id="face-cancel" class="dl alt" type="button" data-i18n="review.cancel"></button>
+      <button id="face-apply" class="dl" type="button" data-i18n="review.apply"></button>
+    </div>
+  </div>
+</div>
+<script type="module" src="app.js?v=0.7.0"></script>
 </body>
 </html>

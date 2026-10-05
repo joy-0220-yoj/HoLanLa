@@ -5,6 +5,8 @@ on:
     branches: [main, master]
     paths:
       - "web/**"
+      - "tests/web/**"
+      - "package.json"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -30,6 +32,9 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       # The site is static: no build step, nothing to install. Guard instead
       # against publishing a personal photo, omitting a donor profile, or
@@ -50,8 +55,8 @@ jobs:
             test -s "$f" || { echo "::error::missing $f"; exit 1; }
           done
 
-      - name: Check the PWA is internally consistent
-        run: node tests/web/check-pwa.mjs
+      - name: Check web regressions, PWA metadata, and translations
+        run: npm test
 
       # enablement turns Pages on if it is not already, so a fresh clone of this
       # repo deploys without anyone visiting the settings page first.
