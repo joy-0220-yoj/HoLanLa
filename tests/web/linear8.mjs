@@ -1,11 +1,12 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
+import "./synthetic-fixtures.mjs";
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {boxes, topBox, findChild, u} from '../../web/src/box.js';
-import {encodeSelectedLinearThumbnail, p3ToLinearI420, validateMain8} from '../../web/src/linear-thumbnail.js';
+import {encodeSelectedLinearThumbnail, encodeLinearThumbnail8, p3ToLinearI420, validateMain8} from '../../web/src/linear-thumbnail.js';
 import {retagLinearHevc, readSpsInfo} from '../../web/src/hevc-linear-tags.js';
-import {loadProfile} from '../../web/src/zip.js';
 import {buildRasterHeic} from '../../web/src/raster-import.js';
 import {discoverHeic, propertyBoxBytes, extractItemData} from '../../web/src/heif.js';
 import {diagnosePortError} from '../../web/src/errors.js';
@@ -133,14 +134,14 @@ globalThis.document = {createElement() {return {getContext() {return {
   getContextAttributes() {return {colorSpace: 'display-p3'};}, save() {}, restore() {}, translate() {}, scale() {}, rotate() {}, drawImage() {},
   getImageData() {return {data: pixels, colorSpace: 'display-p3'};},
 };}};}};
-globalThis.Worker = class {constructor() {throw Error('Default 8-bit must not start a WASM worker');}};
-const encoded = await encodeSelectedLinearThumbnail({width: 32, height: 32});
+globalThis.Worker = class {constructor() {throw Error('Explicit 8-bit must not start a WASM worker');}};
+const encoded = await encodeLinearThumbnail8({width: 32, height: 32});
 assert.equal(encoded.bitDepth, 8); assert.equal(encoded.mode, 'webcodecs-main8-p3-linear');
 assert.equal(captured.init.format, 'I420'); assert.deepEqual(captured.bytes, p3ToLinearI420(pixels, 32, 32, false, {...LINEAR_INPUT, fullRange: true}));
 assert.deepEqual([...encoded.pixi.slice(-3)], [8, 8, 8]);
-supported = false; await assert.rejects(encodeSelectedLinearThumbnail({width: 32, height: 32}), /encoder unavailable/); supported = true;
+supported = false; await assert.rejects(encodeLinearThumbnail8({width: 32, height: 32}), /encoder unavailable/); supported = true;
 outputColor = {matrix: 'smpte170m', fullRange: true};
-const reportedMismatch = await encodeSelectedLinearThumbnail({width: 32, height: 32});
+const reportedMismatch = await encodeLinearThumbnail8({width: 32, height: 32});
 assert.equal(reportedMismatch.transportColor.matrix, 'bt709'); assert.equal(reportedMismatch.transportColor.fullRange, false);
 assert.deepEqual(captured.bytes, p3ToLinearI420(pixels, 32, 32, false, {...LINEAR_INPUT, fullRange: true}), 'input stays full-range while actual SPS describes output');
 // Reproduce the actual Safari report and SPS, using real linear samples in a
@@ -153,7 +154,7 @@ run(['-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-s:v', '32x32', '-r', '1', '-i', 
 const srgbStream = readEncodedMp4(new Uint8Array(fs.readFileSync(srgbMp4)));
 outputRecord = srgbStream.record; outputPayload = srgbStream.payload;
 outputColor = {primaries: 'bt709', matrix: 'bt709', fullRange: false, transfer: 'iec61966-2-1'};
-const safari = await encodeSelectedLinearThumbnail({width: 32, height: 32});
+const safari = await encodeLinearThumbnail8({width: 32, height: 32});
 assert.equal(safari.transportColor.transfer, 'iec61966-2-1');
 assert.equal(captured.init.colorSpace.transfer, 'iec61966-2-1');
 assert.deepEqual(captured.bytes, p3ToLinearI420(pixels, 32, 32, false, {...LINEAR_INPUT, fullRange: true}), 'transport negotiation never gamma-encodes the linear pixels');
@@ -165,14 +166,14 @@ fs.writeFileSync(srgbRaw, Buffer.concat(srgbChunks));
 const srgbDecoded = srgbRaw + '.yuv'; run(['-f', 'hevc', '-i', srgbRaw, '-frames:v', '1', '-pix_fmt', 'yuv420p', '-f', 'rawvideo', '-y', srgbDecoded]);
 assert.deepEqual(fs.readFileSync(srgbDecoded), fs.readFileSync(input), 'actual sRGB-transport HEVC still decodes to exact linear samples after retagging');
 metadataOnce = true;
-const initialMetadataOnly = await encodeSelectedLinearThumbnail({width: 32, height: 32});
+const initialMetadataOnly = await encodeLinearThumbnail8({width: 32, height: 32});
 assert.deepEqual(initialMetadataOnly.payload, safari.payload, 'initial decoder configuration is retained when the real frame omits metadata');
 assert.equal(initialMetadataOnly.transportColor.transfer, 'iec61966-2-1');
 metadataOnce = false;
 realColor = {...outputColor, transfer: 'bt709'};
-assert.equal((await encodeSelectedLinearThumbnail({width: 32, height: 32})).transportColor.transfer, 'iec61966-2-1', 'unchanged SPS takes precedence over stale transfer metadata');
+assert.equal((await encodeLinearThumbnail8({width: 32, height: 32})).transportColor.transfer, 'iec61966-2-1', 'unchanged SPS takes precedence over stale transfer metadata');
 realRecord = record;
-await assert.rejects(encodeSelectedLinearThumbnail({width: 32, height: 32}), /changed transfer: bt709/);
+await assert.rejects(encodeLinearThumbnail8({width: 32, height: 32}), /changed transfer: bt709/);
 realColor = null; realRecord = null;
 // All common browser matrix/range reports must encode the corresponding linear
 // samples and retain those values in both SPS and HEIC nclx, without loading WASM.
@@ -187,7 +188,7 @@ for (const [matrix, code] of [['bt709', 1], ['smpte170m', 6], ['bt470bg', 5]]) f
     '-tag:v', 'hvc1', '-y', file]);
   const source = readEncodedMp4(new Uint8Array(fs.readFileSync(file)));
   outputRecord = source.record; outputPayload = source.payload; outputColor = color;
-  const result = await encodeSelectedLinearThumbnail({width: 32, height: 32});
+  const result = await encodeLinearThumbnail8({width: 32, height: 32});
   assert.deepEqual(captured.init.colorSpace, {...color, fullRange: true}, label);
   assert.deepEqual(captured.bytes, p3ToLinearI420(pixels, 32, 32, false, {...color, fullRange: true}), label + ': input pixels stay full-range');
   assert.deepEqual(result.transportColor, color);
@@ -204,7 +205,7 @@ for (const [matrix, code] of [['bt709', 1], ['smpte170m', 6], ['bt470bg', 5]]) f
   const arrays = sourceArrays.map(n => {const bytes = n.type === 33 ? missingVideo : n.nal; return Buffer.concat([Buffer.from([128 | n.type, 0, 1, bytes.length >> 8, bytes.length & 255]), Buffer.from(bytes)]);});
   const header = source.record.slice(0, 23); header[22] = sourceArrays.length;
   outputRecord = new Uint8Array(Buffer.concat([Buffer.from(header), ...arrays]));
-  const missing = await encodeSelectedLinearThumbnail({width: 32, height: 32});
+  const missing = await encodeLinearThumbnail8({width: 32, height: 32});
   assert.deepEqual(missing.transportColor, color, label + ': metadata fills absent SPS colour fields');
   const restored = readSpsInfo(nalArrays(missing.hvcc.slice(8)).find(n => n.type === 33).nal);
   assert.equal(restored.matrix, code); assert.equal(restored.fullRange, fullRange);
@@ -216,9 +217,9 @@ for (const [matrix, code] of [['bt709', 1], ['smpte170m', 6], ['bt470bg', 5]]) f
   run(['-f', 'hevc', '-i', hevc, '-frames:v', '1', '-pix_fmt', fullRange ? 'yuvj420p' : 'yuv420p', '-f', 'rawvideo', '-y', rawOutput]);
   assert.deepEqual(fs.readFileSync(rawOutput), Buffer.from(samples), label + ': decoded linear samples survive retagging exactly');
 }
-for (const bitDepth of [9, 10]) await assert.rejects(encodeSelectedLinearThumbnail({width: 32, height: 32}, {bitDepth}), /Only 8-bit/);
+for (const bitDepth of [9, 12]) await assert.rejects(encodeSelectedLinearThumbnail({width: 32, height: 32}, {bitDepth}), /Unsupported linear thumbnail bit depth/);
 assert.equal(diagnosePortError(Error('8-bit linear thumbnail encode failed')).code, 'linear8');
-const profile = await loadProfile(new Uint8Array(fs.readFileSync('web/profiles/48-12.zip'))), donor = discoverHeic(profile.meta);
+const profile = await generatedProfileFixture('48-12'), donor = discoverHeic(profile.meta);
 const output = buildRasterHeic(profile, {main: Array.from({length: 48}, () => new Uint8Array([1])),
   mainHvcc: propertyBoxBytes(profile.meta, donor.props, donor.primaryTiles[0], 'hvcC'),
   thumb: new Uint8Array([2]), thumbHvcc: propertyBoxBytes(profile.meta, donor.props, donor.thumbnail, 'hvcC'),
@@ -227,4 +228,4 @@ const out = discoverHeic(output);
 assert.deepEqual(propertyBoxBytes(output, out.props, out.linearThumb, 'pixi'), encoded.pixi);
 assert.deepEqual(propertyBoxBytes(output, out.props, out.linearThumb, 'colr'), encoded.colr);
 assert.deepEqual(extractItemData(output, out, out.linearThumb), encoded.payload);
-console.log('8-bit default: linear BT.709/BT.601 in full/limited range, actual HEVC lossless roundtrips, SPS/pixi/colr agreement, no WASM worker, errors and independent auxiliary passed');
+console.log('Explicit 8-bit legacy path: linear BT.709/BT.601 in full/limited range, actual HEVC lossless roundtrips, SPS/pixi/colr agreement, no WASM worker, errors and independent auxiliary passed');

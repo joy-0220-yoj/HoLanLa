@@ -1,63 +1,55 @@
-import assert from "node:assert/strict";
-import {readFileSync} from "node:fs";
-import vm from "node:vm";
-import {MODEL_CACHE_NAME} from "../../web/src/model-download.js";
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+import {MODEL_CACHE_NAME} from '../../web/src/model-download.js';
+import {ORT_ASSETS} from '../../web/src/ort-assets.js';
+import {FFMPEG_ASSETS} from '../../web/src/ffmpeg-assets.js';
 
 const handlers = new Map(), stores = new Map(), requests = [];
-const source = readFileSync(new URL("../../web/sw.js", import.meta.url), "utf8");
-const appCache = "holanla-" + source.match(/const CACHE_NAME = `\$\{CACHE_PREFIX\}([^`]+)`/)[1];
-const runtime = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/";
+const source = readFileSync(new URL('../../web/sw.js', import.meta.url), 'utf8');
+const appCache = 'holanla-' + source.match(/const CACHE_NAME = `\$\{CACHE_PREFIX\}([^`]+)`/)[1];
+const supported = [...ORT_ASSETS, ...FFMPEG_ASSETS].map(asset => asset.url);
+for (const name of ['holanla-old', appCache, MODEL_CACHE_NAME, 'unrelated-site-cache']) stores.set(name, new Map());
+for (const url of supported) stores.get(MODEL_CACHE_NAME).set(url, new Response('fixture'));
+const script = 'https://site.test/app.js?v=0.8.0';
+stores.get(appCache).set(script, new Response('current script'));
 let offline = false;
-for (const name of ["holanla-old", appCache, MODEL_CACHE_NAME, "unrelated-site-cache"]) stores.set(name, new Map());
 vm.runInNewContext(source, {
-  self: {location: {origin: "https://site.test"}, addEventListener: (name, handler) => handlers.set(name, handler),
+  self: {location: {origin: 'https://site.test', href: 'https://site.test/sw.js?v=0.8.0'}, addEventListener: (name, handler) => handlers.set(name, handler),
     clients: {claim: async () => {}}, skipWaiting: async () => {}},
-  caches: {
-    keys: async () => [...stores.keys()], delete: async name => stores.delete(name),
+  caches: {keys: async () => [...stores.keys()], has: async name => stores.has(name), delete: async name => stores.delete(name),
     open: async name => {
       if (!stores.has(name)) stores.set(name, new Map());
       const entries = stores.get(name);
-      return {match: async request => entries.get(request.url)?.clone(),
-        put: async (request, response) => {
-          const bytes = await response.arrayBuffer();
-          entries.set(request.url, new Response(bytes, {headers: response.headers}));
-        }};
-    },
-  },
-  fetch: async request => {
-    requests.push(request.url);
-    if (offline) throw Error("offline");
-    return new Response("export const cached = true;", {headers: {"Content-Type": "text/javascript"}});
-  }, Headers, Response, URL, console,
+      return {keys: async () => [...entries.keys()].map(url => new Request(url)), delete: async request => entries.delete(request.url),
+        match: async request => entries.get(request.url)?.clone(), put: async (request, response) => entries.set(request.url, response.clone())};
+    }},
+  fetch: async request => {if (offline) throw Error('offline'); requests.push(request.url); return new Response('export const cached = true;');},
+  Headers, Response, URL, Request, console,
 });
 const activation = [];
-handlers.get("activate")({waitUntil: promise => activation.push(promise)});
+handlers.get('activate')({waitUntil: promise => activation.push(promise)});
 await Promise.all(activation);
-assert.ok(!stores.has("holanla-old"));
-assert.ok(stores.has(appCache));
-assert.ok(stores.has(MODEL_CACHE_NAME), "website upgrades must retain model assets");
-assert.ok(stores.has("unrelated-site-cache"));
-
-async function request(url) {
-  const pending = [];
+assert.ok(!stores.has('holanla-old'));
+assert.ok(stores.has(appCache)); assert.ok(stores.has('unrelated-site-cache'));
+assert.deepEqual([...stores.get(MODEL_CACHE_NAME).keys()], supported, 'website updates retain the independent resource cache');
+for (const url of [...supported, 'https://unrelated.test/model.js']) {
+  let intercepted = false;
+  handlers.get('fetch')({request: new Request(url), respondWith: () => {intercepted = true;}});
+  assert.equal(intercepted, false, 'the worker does not route any third-party runtime requests');
+}
+assert.deepEqual(requests, []);
+offline = true;
+function request(url) {
   let response;
-  handlers.get("fetch")({request: new Request(url), respondWith: promise => {response = promise;},
-    waitUntil: promise => pending.push(promise)});
-  const result = await response;
-  await Promise.all(pending);
-  return result;
+  handlers.get('fetch')({request: new Request(url), respondWith: promise => {response = promise;}});
+  return response;
 }
-for (const path of ["+esm", "wasm/vision_wasm_internal.js"]) {
-  offline = false;
-  assert.match(await (await request(runtime + path)).text(), /cached = true/);
-  const count = requests.length;
-  offline = true;
-  assert.match(await (await request(runtime + path)).text(), /cached = true/);
-  assert.equal(requests.length, count, "cached runtime scripts do not contact the CDN");
+assert.equal(await (await request(script)).text(), 'current script');
+await assert.rejects(request('https://site.test/app.js?v=older'), /offline/,
+  'offline JavaScript must never substitute a different cached version');
+for (const file of ['face-mattes.js', 'model-cache.js', 'raster-import.js']) {
+  assert.doesNotMatch(readFileSync(new URL('../../web/src/' + file, import.meta.url), 'utf8'), /tasks-vision|FilesetResolver|FaceLandmarker\.create|ImageSegmenter\.create/);
 }
-for (const url of [runtime + "wasm/vision_wasm_internal.wasm",
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@different/+esm", "https://unrelated.test/model.js"]) {
-  assert.equal(await request(url), undefined, "only the pinned runtime scripts are intercepted");
-}
-assert.equal(stores.get(MODEL_CACHE_NAME).size, 2);
-console.log("Service worker retains vision assets during upgrades and serves only the pinned runtime scripts cache-first, including offline.");
+assert.doesNotMatch(readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8'), /vision-engine|engine\.mediapipe/);
+console.log('ONNX Runtime-only backend, independent resource cache and external request isolation: passed.');

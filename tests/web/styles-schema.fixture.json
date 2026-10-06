@@ -1,0 +1,62 @@
+{
+  "provenance": "Field names and identity-data SHA-256 observed in the former author profiles; no binary payloads retained.",
+  "root": [
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "i",
+    "j"
+  ],
+  "nested": {
+    "6": [
+      "LinearGTCImage",
+      "LinearImage",
+      "LinearImagePersonSegmentBased",
+      "LinearImageSkinBased",
+      "ToneMappedImage",
+      "ToneMappedImageBlueChannelSkinBased",
+      "ToneMappedImageGreenChannelSkinBased",
+      "ToneMappedImagePersonSegmentBased",
+      "ToneMappedImageRedChannelSkinBased",
+      "ToneMappedImageSkinBased"
+    ],
+    "7": [
+      "PeopleRatio",
+      "PersonMasksValidHint",
+      "SkinRatio"
+    ],
+    "i": [
+      "Gain",
+      "OriginalRangeMax",
+      "OriginalRangeMin"
+    ]
+  },
+  "block": [
+    "blackPoint",
+    "highKey",
+    "p02",
+    "p10",
+    "p25",
+    "p50",
+    "p75",
+    "p98",
+    "whitePoint"
+  ],
+  "identitySha256": {
+    "1": "43e0ae73508cc10684d4be708fa1d19f3b55b8de15cb8e3544ef16300db91dbe",
+    "3": "3a9c98077c8e40bd452d156be3bad5a53ad6ba5cb0dcae625782e846d0147e36",
+    "c": "5020c29b21eb115368fa6abe4dbbe0de691ef692c04378a0073cdeda9a13ba16",
+    "d": "e1bfaac4a55dc64a993a82431fbdb821823c31658b09e877602779c939fff673"
+  }
+}

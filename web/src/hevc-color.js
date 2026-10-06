@@ -1,5 +1,6 @@
 // Measure encoded black/white levels instead of trusting WebCodecs range metadata.
-import {readSpsInfo} from './hevc-linear-tags.js?v=0.7.0';
+import {readSpsInfo} from './hevc-linear-tags.js?v=0.8.0';
+import {decodeHevcLuma} from './ffmpeg-hevc.js?v=0.8.0';
 
 export function hevcSpsColor(record) {
   if (record.length < 23 || record[0] !== 1) throw Error('Invalid HEVC colour configuration');
@@ -48,36 +49,63 @@ export function blackWhiteI420(width, height) {
   return bytes;
 }
 
-export async function measureHevcRange(record, payload, config, onProgress) {
+async function readNativeLuma(record, payload, config, onProgress) {
   if (!globalThis.VideoDecoder || !globalThis.EncodedVideoChunk)
     throw Error('HEVC colour calibration requires a local WebCodecs decoder');
   let frame, failure;
   onProgress?.({stage: 'codec', operation: 'decode', source: 'WebCodecs VideoDecoder'});
-  const decoder = new VideoDecoder({output(value) { frame?.close(); frame = value; }, error(error) { failure = error; }});
+  let decoder;
   try {
+    decoder = new VideoDecoder({output(value) { frame?.close(); frame = value; }, error(error) { failure = error; }});
     decoder.configure({codec: config.codec, description: record, hardwareAcceleration: 'no-preference'});
     decoder.decode(new EncodedVideoChunk({type: 'key', timestamp: 0, data: payload}));
     await decoder.flush();
     if (failure) throw failure;
-    if (!frame || !['I420', 'I420A', 'NV12'].includes(frame.format))
+    if (!frame || !['I420', 'I420A', 'I422', 'I422A', 'I444', 'I444A', 'NV12'].includes(frame.format))
       throw Error('HEVC colour calibration could not read native 8-bit YUV samples');
     // Copy the native YUV format, without RGB conversion or range normalization.
     const bytes = new Uint8Array(frame.allocationSize()), layout = await frame.copyTo(bytes);
-    const {width, height} = frame.visibleRect;
-    const radius = Math.max(0, Math.min(4, Math.floor(width / 8), Math.floor(height / 4)) - 1);
-    const level = x => {
-      let sum = 0, count = 0;
-      for (let y = Math.floor(height / 2) - radius; y <= Math.floor(height / 2) + radius; y++)
-        for (let col = x - radius; col <= x + radius; col++) {
-          sum += bytes[layout[0].offset + y * layout[0].stride + col]; count++;
-        }
-      return sum / count;
-    };
-    const black = level(Math.floor(width / 4)), white = level(Math.floor(3 * width / 4));
-    const fullError = Math.abs(black) + Math.abs(white - 255);
-    const limitedError = Math.abs(black - 16) + Math.abs(white - 235);
-    if (Math.min(fullError, limitedError) > 12 || Math.abs(fullError - limitedError) < 8)
-      throw Error(`HEVC colour calibration returned unexpected black/white levels: ${black}/${white}`);
-    return fullError < limitedError;
-  } finally { frame?.close(); decoder.close(); }
+    const {x = 0, y = 0, width, height} = frame.visibleRect || {}, plane = layout[0];
+    if (![x, y, width, height, plane?.offset, plane?.stride].every(Number.isInteger)
+        || x < 0 || y < 0 || width < 2 || height < 2 || plane.offset < 0 || plane.stride < x + width
+        || plane.offset + (y + height - 1) * plane.stride + x + width > bytes.length)
+      throw Error('HEVC colour calibration has invalid native plane layout');
+    return {bytes, width, height, offset: plane.offset + y * plane.stride + x, stride: plane.stride};
+  } finally {
+    frame?.close();
+    if (decoder && decoder.state !== 'closed') decoder.close();
+  }
+}
+
+export async function measureHevcRange(record, payload, config, onProgress, readSoftwareLuma = decodeHevcLuma) {
+  let nativeError, samples;
+  try { samples = await readNativeLuma(record, payload, config, onProgress); }
+  catch (error) { nativeError = error; }
+  if (!samples) {
+    try {
+      const decoded = await readSoftwareLuma(record, payload, config, onProgress);
+      if (!(decoded.bytes instanceof Uint8Array) || decoded.width !== config.width || decoded.height !== config.height
+          || decoded.bytes.length !== decoded.width * decoded.height)
+        throw Error('HEVC calibration decoded dimensions disagree');
+      samples = {...decoded, offset: 0, stride: decoded.width};
+    } catch (error) {
+      throw Error(`HEVC colour calibration software fallback failed: ${error.message}`, {cause: nativeError});
+    }
+  }
+  const {bytes, width, height, offset, stride} = samples;
+  const radius = Math.max(0, Math.min(4, Math.floor(width / 8), Math.floor(height / 4)) - 1);
+  const level = x => {
+    let sum = 0, count = 0;
+    for (let y = Math.floor(height / 2) - radius; y <= Math.floor(height / 2) + radius; y++)
+      for (let col = x - radius; col <= x + radius; col++) {
+        sum += bytes[offset + y * stride + col]; count++;
+      }
+    return sum / count;
+  };
+  const black = level(Math.floor(width / 4)), white = level(Math.floor(3 * width / 4));
+  const fullError = Math.abs(black) + Math.abs(white - 255);
+  const limitedError = Math.abs(black - 16) + Math.abs(white - 235);
+  if (Math.min(fullError, limitedError) > 12 || Math.abs(fullError - limitedError) < 8)
+    throw Error(`HEVC colour calibration returned unexpected black/white levels: ${black}/${white}`);
+  return fullError < limitedError;
 }

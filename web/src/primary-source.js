@@ -1,5 +1,33 @@
-import { discoverHeic, discoverImageItems, removeItems, parseIloc, extractItemData, parseIpcoIpma, setItemPropertyAssociations } from "./heif.js?v=0.7.0";
-import { topBox, metaChildren, findChild, boxes, u, concat, be, bytesEqual } from "./box.js?v=0.7.0";
+import { discoverHeic, discoverImageItems, removeItems, parseIloc, extractItemData, parseIpcoIpma, setItemPropertyAssociations } from "./heif.js?v=0.8.0";
+import { topBox, metaChildren, findChild, boxes, u, concat, be, bytesEqual } from "./box.js?v=0.8.0";
+
+// Replacing meta moves only file-relative payloads after that box. A complete
+// mdat before meta is valid and must keep its offsets; idat offsets are relative.
+function relocatePayloads(meta, originalMeta, fileLength, label) {
+  const {off, size} = originalMeta, end = off + size, growth = meta.length - size;
+  const iloc = parseIloc(meta, topBox(meta, "meta"));
+  for (const item of iloc.items.values()) if (item.constructionMethod === 0) {
+    for (const extent of item.extents) {
+      const start = item.baseOffset + extent.offset, stop = start + extent.length;
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(stop) || start < 0 || stop > fileLength)
+        throw Error(`${label} payload exceeds file bounds`);
+      if (extent.length && start < end && stop > off)
+        throw Error(`${label} payload overlaps metadata`);
+    }
+    if (item.baseOffset >= end && iloc.baseOffsetSize && item.extents.length) {
+      const base = item.baseOffset + growth;
+      if (base < 0 || base >= 2 ** (8 * iloc.baseOffsetSize)) throw Error(`${label} base offset exceeds capacity`);
+      const basePos = item.extents[0].offsetPos - iloc.indexSize - 2 - iloc.baseOffsetSize;
+      meta.set(be(base, iloc.baseOffsetSize), basePos);
+    } else for (const extent of item.extents) {
+      if (item.baseOffset + extent.offset < end) continue;
+      const offset = extent.offset + growth;
+      if (!iloc.offsetSize || offset < 0 || offset >= 2 ** (8 * iloc.offsetSize))
+        throw Error(`${label} offset exceeds capacity`);
+      meta.set(be(offset, iloc.offsetSize), extent.offsetPos);
+    }
+  }
+}
 
 /** Expose one auxiliary (and its grid tiles) as a standalone primary for libheif.
  * Compressed samples, color descriptions and transforms are preserved unchanged. */
@@ -30,22 +58,7 @@ export function isolateImageItem(data, iid, source = discoverImageItems(data)) {
       .map(a => [a.index, a.essential]);
     meta = setItemPropertyAssociations(meta, id, associations);
   }
-  const growth = meta.length - size, iloc = parseIloc(meta, topBox(meta, "meta"));
-  for (const item of iloc.items.values()) if (item.constructionMethod === 0) {
-    if (item.baseOffset >= off + size && iloc.baseOffsetSize && item.extents.length) {
-      const base = item.baseOffset + growth;
-      if (base < 0 || base >= 2 ** (8 * iloc.baseOffsetSize)) throw Error("Image base offset exceeds capacity");
-      const basePos = item.extents[0].offsetPos - iloc.indexSize - 2 - iloc.baseOffsetSize;
-      meta.set(be(base, iloc.baseOffsetSize), basePos);
-      continue;
-    }
-    for (const extent of item.extents) {
-      if (item.baseOffset + extent.offset < off + size) throw Error("Image payload overlaps metadata");
-      const offset = extent.offset + growth;
-      if (!iloc.offsetSize || offset < 0 || offset >= 2 ** (8 * iloc.offsetSize)) throw Error("Image offset exceeds capacity");
-      meta.set(be(offset, iloc.offsetSize), extent.offsetPos);
-    }
-  }
+  relocatePayloads(meta, source.meta, data.length, "Image");
   // infe's item_hidden flag can prevent a promoted auxiliary becoming a top-level image.
   m = topBox(meta, "meta");
   const iinf = findChild(metaChildren(meta, m), "iinf");
@@ -67,13 +80,7 @@ export function isolatePrimaryImage(data) {
   const removed = [...source.infos.keys()].filter(id => !keep.has(id));
   const { off, size } = source.meta;
   const meta = removeItems(data.slice(off, off + size), removed);
-  const growth = meta.length - size, iloc = parseIloc(meta, topBox(meta, "meta"));
-  for (const item of iloc.items.values()) if (item.constructionMethod === 0) for (const extent of item.extents) {
-    if (item.baseOffset + extent.offset < off + size) throw new Error("Primary decode payload overlaps metadata");
-    const offset = extent.offset + growth;
-    if (!iloc.offsetSize || offset < 0 || offset >= 2 ** (iloc.offsetSize * 8)) throw new Error("Primary decode offset exceeds capacity");
-    meta.set(be(offset, iloc.offsetSize), extent.offsetPos);
-  }
+  relocatePayloads(meta, source.meta, data.length, "Primary decode");
   const result = concat([data.subarray(0, off), meta, data.subarray(off + size)]), check = discoverHeic(result);
   if (check.hdrGrid !== null || check.deltaGrid !== null || check.stylesItem !== null || check.linearThumb !== null)
     throw new Error("Primary decode isolation failed");

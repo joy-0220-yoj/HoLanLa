@@ -1,10 +1,11 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
+import "./synthetic-fixtures.mjs";
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {loadProfile} from '../../web/src/zip.js';
 import {patch} from '../../web/src/port.js';
 import {topBox,be,concat} from '../../web/src/box.js';
 import {discoverHeic,extractItemData,auxUriForItem,propertyBoxBytes,dimensionsForItem,removeItems,parseIloc,MATTE_URIS} from '../../web/src/heif.js';
-const source=new Uint8Array(fs.readFileSync('tests/private-fixtures/native-style.heic')),sd=discoverHeic(source),profile=await loadProfile(new Uint8Array(fs.readFileSync('web/profiles/45-15.zip')));
+const source=new Uint8Array(fs.readFileSync('tests/private-fixtures/native-style.heic')),sd=discoverHeic(source),profile=await generatedProfileFixture('45-15');
 const uri=MATTE_URIS.portraiteffectsmatte,idOf=d=>[...d.infos.keys()].find(id=>auxUriForItem(d.props,id)===uri),sid=idOf(sd),[width,height]=dimensionsForItem(sd.props,sid);
 const replacement={payload:extractItemData(source,sd,sid),hvcc:propertyBoxBytes(source,sd.props,sid,'hvcC'),pixi:propertyBoxBytes(source,sd.props,sid,'pixi'),width,height};
 // A portrait-absent fixture tests the normal patch pipeline, independently of removed UI experiments.

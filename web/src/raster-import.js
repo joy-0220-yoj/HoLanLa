@@ -1,27 +1,33 @@
-import { isolatePrimaryImage } from "./primary-source.js?v=0.7.0";
-// Experimental raster (PNG/JPEG/WebP) -> Apple-shaped Photographic Style HEIC import.
-// Primary and independent 8-bit linear encoding use local Canvas + WebCodecs.
+import { isolatePrimaryImage } from "./primary-source.js?v=0.8.0";
+import {decodeDng} from './dng-decode.js?v=0.8.0';
+import {prepareDngMattes} from './dng-mattes.js?v=0.8.0';
+import {releaseHevcEncoder} from './ffmpeg-hevc.js?v=0.8.0';
+import {releaseOrtModels} from './ort-vision.js?v=0.8.0';
+// Experimental raster (PNG/JPEG/WebP/developed DNG) -> Apple-shaped Photographic Style HEIC import.
+// Primary and independent 10-bit linear encoding use local Canvas + WebCodecs.
 
-import { topBox, metaChildren, findChild, be, box, concat } from "./box.js?v=0.7.0";
+import { topBox, metaChildren, findChild, be, box, concat } from "./box.js?v=0.8.0";
 import {
   discoverHeic, discoverImageItems, parseIloc, parseIpcoIpma, extractItem, propertyForItem,
-  replaceIpcoProperty, repointItemProperty, removeItems, setItemReference, ispeBox, addItems,
+  replaceItemPropertyWithSource, compactItemProperties, repointItemProperty, removeItems, setItemReference, ispeBox, addItems,
   propertyBoxBytes, auxUriForItem, dimensionsForItem, DEPTH_URI, MATTE_URIS,
   appendIpcoProperty, associateItemProperty, setItemPropertyAssociations,
   itemOrientation, displayDimensions,
-} from "./heif.js?v=0.7.0";
-import { addTextureItems, upgradeStylesV16 } from "./texture.js?v=0.7.0";
+} from "./heif.js?v=0.8.0";
+import { addTextureItems, upgradeStylesV16 } from "./texture.js?v=0.8.0";
 import {
   applySceneStatistics, applyPersonMetadata, setPersonMasksValid, linearLumaFromRgb,
-} from "./styles.js?v=0.7.0";
-import { generateRasterFaceMattes } from "./face-mattes.js?v=0.7.0";
-import {decodeToDisplayCanvas, decodeImageItem} from "./decode.js?v=0.7.0";
-import {installPortraitMatte} from './portrait-matte.js?v=0.7.0';
-import { extractRasterExif, preserveRasterExif } from "./exif.js?v=0.7.0";
-import { rasterFrame, rasterColr, rasterVideoColorSpace, checkEncodedColorSpace, resolveEncodedColorSpace } from "./raster-color.js?v=0.7.0";
-import {blackWhiteI420, measureHevcRange, hevcOutputColor} from './hevc-color.js?v=0.7.0';
-import { encodeSelectedLinearThumbnail as encodeLinearThumbnail, linearGeometry } from "./linear-thumbnail.js?v=0.7.0";
-import { supportedHevcConfig } from "./hevc-encoder.js?v=0.7.0";
+} from "./styles.js?v=0.8.0";
+import { generateRasterFaceMattes } from "./face-mattes.js?v=0.8.0";
+import {decodeToDisplayCanvas, decodeImageItem} from "./decode.js?v=0.8.0";
+import {installPortraitMatte} from './portrait-matte.js?v=0.8.0';
+import { extractRasterExif, preserveRasterExif, buildAppleStyleExif } from "./exif.js?v=0.8.0";
+import { rasterFrame, rasterColr, rasterVideoColorSpace, checkEncodedColorSpace, resolveEncodedColorSpace } from "./raster-color.js?v=0.8.0";
+import {blackWhiteI420, measureHevcRange, hevcOutputColor} from './hevc-color.js?v=0.8.0';
+import { encodeSelectedLinearThumbnail as encodeLinearThumbnail, linearGeometry } from "./linear-thumbnail.js?v=0.8.0";
+import { supportedHevcConfig } from "./hevc-encoder.js?v=0.8.0";
+import {ensureHevcEncoder} from './ffmpeg-hevc.js?v=0.8.0';
+import {generateSyntheticHevc} from './synthetic-hevc.js?v=0.8.0';
 
 const TILE = 512, MAX_PRIMARY_TILES = 48;
 const THUMB_W = 416, THUMB_H = 312;
@@ -186,7 +192,7 @@ function thumbnailCanvas(stored, geometry) {
   return canvas;
 }
 
-async function openBrowserImage(file, onProgress) {
+async function openBrowserImage(file, onProgress, {reportFailure = true} = {}) {
   let image, close = () => image?.close?.();
   onProgress?.({stage: "codec", operation: "decode", source: "createImageBitmap"});
   try { image = await createImageBitmap(file, { imageOrientation: "from-image" }); }
@@ -204,7 +210,7 @@ async function openBrowserImage(file, onProgress) {
       } catch (error) {
         URL.revokeObjectURL(url);
         const reason = error?.message || String(error);
-        onProgress?.({stage: "codec", operation: "decode", source: "Image.decode()", decodeError: reason});
+        if (reportFailure) onProgress?.({stage: "codec", operation: "decode", source: "Image.decode()", decodeError: reason});
         throw new Error(`Raster image decode failed: ${reason}`);
       }
     }
@@ -213,10 +219,10 @@ async function openBrowserImage(file, onProgress) {
 }
 
 /** Native decoding preserves the existing browser color-management path. HEIC
- * sources also have a selected-decoder fallback when native HEIF is unavailable.
+ * sources also have an automatic codec fallback when native HEIF is unavailable.
  * Fallback returns an owned canvas with real P3-managed pixels. */
 export async function openHeicSource(file, sourceBytes, {decoder, onProgress} = {}) {
-  try { return await openBrowserImage(file, onProgress); }
+  try { return await openBrowserImage(file, onProgress, {reportFailure: false}); }
   catch (nativeError) {
     try {
       const data = sourceBytes || new Uint8Array(await file.arrayBuffer());
@@ -233,15 +239,12 @@ export async function openHeicSource(file, sourceBytes, {decoder, onProgress} = 
 
 /** Build the independent auxiliary without changing the source's primary tiles. */
 export async function prepareHeicLinearThumbnail(file, bytes, discovery, onProgress = () => {}, {decoder} = {}) {
-  const dimensions = dimensionsForItem(discovery.props, discovery.primary);
-  const {width, height} = linearGeometry(...dimensions);
-  if (!await supportedHevcConfig(width, height, 4_000_000, {level: 120}))
-    throw Error('8-bit linear thumbnail HEVC encoder unavailable');
+  await ensureHevcEncoder(onProgress);
   const primaryBytes = isolatePrimaryImage(bytes);
   const primaryFile = new File([primaryBytes], file.name, { type: "image/heic" });
   let opened;
   try { opened = await openHeicSource(primaryFile, primaryBytes, {decoder, onProgress}); }
-  catch (error) { throw new Error(`8-bit linear thumbnail primary decode unavailable: ${error.message}`); }
+  catch (error) { throw new Error(`10-bit linear thumbnail primary decode unavailable: ${error.message}`); }
   try {
     const encoded = await encodeLinearThumbnail(opened.image,
       itemOrientation(bytes, discovery.props, discovery.primary), onProgress);
@@ -323,23 +326,7 @@ function sceneLuma(image) {
 
 /** Minimal Apple Exif containing Orientation=6 and only MakerNote tag 0x54. */
 export function buildRasterExif(mn54, makerType = 7, sourceExif = null, geometry = null) {
-  const mnHeader = concat([bytes("Apple iOS"), new Uint8Array([0, 0, 1]), bytes("MM")]);
-  const maker = concat([
-    mnHeader, be(1, 2),
-    be(0x54, 2), be(makerType, 2), be(mn54.length, 4), be(32, 4),
-    be(0, 4), mn54,
-  ]);
-  const tiff = concat([
-    bytes("MM"), be(42, 2), be(8, 4),
-    be(2, 2),
-    be(0x0112, 2), be(3, 2), be(1, 4), be(6, 2), be(0, 2),
-    be(0x8769, 2), be(4, 2), be(1, 4), be(38, 4),
-    be(0, 4),
-    be(1, 2),
-    be(0x927c, 2), be(7, 2), be(maker.length, 4), be(56, 4),
-    be(0, 4), maker,
-  ]);
-  const minimal = concat([be(6, 4), bytes("Exif\0\0"), tiff]);
+  const minimal = buildAppleStyleExif(mn54, makerType);
   return sourceExif ? preserveRasterExif(sourceExif, minimal, {
     width: geometry?.storedWidth, height: geometry?.storedHeight,
   }) : minimal;
@@ -371,7 +358,7 @@ function replaceIspe(meta, iid, width, height) {
   const props = parseIpcoIpma(meta, topBox(meta, "meta"));
   const ispe = propertyForItem(props, iid, "ispe");
   if (!ispe) throw new Error(`Item ${iid} has no ispe property`);
-  return replaceIpcoProperty(meta, ispe.index, ispeBox(width, height), "ispe");
+  return replaceItemPropertyWithSource(meta, iid, "ispe", ispeBox(width, height));
 }
 
 function same(a, b) {
@@ -506,8 +493,11 @@ export function buildRasterHeic(profile, encoded, sortedLuma = null, faceResult 
   }
 
   // The donor's old people mattes must never leak into a newly imported screenshot/photo.
-  const donorPeople = [96, 97, 98, 99, 100, 101].filter((iid) =>
-    parseIloc(meta, topBox(meta, "meta")).items.has(iid));
+  const donorDiscovery = discoverHeic(meta);
+  const donorMaskIds = new Set([...donorDiscovery.infos.keys()].filter(id =>
+    Object.values(MATTE_URIS).includes(auxUriForItem(donorDiscovery.props, id))));
+  const donorPeople = [...donorMaskIds, ...donorDiscovery.refs.filter(ref =>
+    ref.type === 'cdsc' && ref.to.some(id => donorMaskIds.has(id))).map(ref => ref.from)];
   if (donorPeople.length) {
     meta = removeItems(meta, donorPeople);
     donorPeople.forEach((iid) => payloads.delete(iid));
@@ -522,13 +512,10 @@ export function buildRasterHeic(profile, encoded, sortedLuma = null, faceResult 
   payloads.set(Number(manifest.donor_exif_item), exif);
 
   let props = parseIpcoIpma(meta, topBox(meta, "meta"));
-  const main0 = Number(manifest.donor_primary_tiles[0]);
-  meta = replaceIpcoProperty(meta, propertyForItem(props, main0, "hvcC").index,
-    encoded.mainHvcc, "hvcC");
-  props = parseIpcoIpma(meta, topBox(meta, "meta"));
+  for (const iid of primarySlots)
+    meta = replaceItemPropertyWithSource(meta, iid, "hvcC", encoded.mainHvcc);
   const thumb = Number(manifest.donor_thumbnail_item);
-  meta = replaceIpcoProperty(meta, propertyForItem(props, thumb, "hvcC").index,
-    encoded.thumbHvcc, "hvcC");
+  meta = replaceItemPropertyWithSource(meta, thumb, "hvcC", encoded.thumbHvcc);
 
   // Encoded RGB/YUV color must travel with its own colr, never the donor's ICC profile.
   const assignColor = (ids, color) => {
@@ -546,6 +533,14 @@ export function buildRasterHeic(profile, encoded, sortedLuma = null, faceResult 
     encoded.mainColr || rasterColr(rasterVideoColorSpace()));
   assignColor([thumb, Number(manifest.donor_linear_thumb_item)],
     encoded.thumbColr || rasterColr(rasterVideoColorSpace()));
+  // WebCodecs raster frames are Main8 even when the generated template is Main10.
+  let rasterPixiIndex;
+  [meta, rasterPixiIndex] = appendIpcoProperty(meta, box('pixi', new Uint8Array([0,0,0,0,3,8,8,8])));
+  for (const id of [Number(manifest.donor_primary_item), ...primarySlots, Number(manifest.donor_hdr_grid_item), ...hdrSlots, thumb]) {
+    const current = parseIpcoIpma(meta, topBox(meta, 'meta'));
+    const kept = (current.associations.get(id) || []).filter(a => current.properties[a.index - 1]?.type !== 'pixi');
+    meta = setItemPropertyAssociations(meta, id, [...kept.map(a => [a.index, a.essential]), [rasterPixiIndex, false]]);
+  }
 
   // linearthumbnail reuses the encoded thumbnail, including its dimensions/pixi/hvcC.
   const linear = Number(manifest.donor_linear_thumb_item);
@@ -571,10 +566,8 @@ export function buildRasterHeic(profile, encoded, sortedLuma = null, faceResult 
     }
   }
 
-  const hdr0 = Number(manifest.donor_hdr_tiles[0]);
-  props = parseIpcoIpma(meta, topBox(meta, "meta"));
-  meta = replaceIpcoProperty(meta, propertyForItem(props, hdr0, "hvcC").index,
-    encoded.hdrHvcc, "hvcC");
+  for (const iid of hdrSlots)
+    meta = replaceItemPropertyWithSource(meta, iid, "hvcC", encoded.hdrHvcc);
   // WebCodecs emits ordinary 3-plane video; point the gain-map grid at a 3x8 pixi.
   props = parseIpcoIpma(meta, topBox(meta, "meta"));
   const hdrGrid = Number(manifest.donor_hdr_grid_item);
@@ -603,12 +596,14 @@ export function buildRasterHeic(profile, encoded, sortedLuma = null, faceResult 
 
   let texturePayloads;
   [meta, texturePayloads] = addTextureItems(meta, primary, {
-    matteOverrides: new Map([...(faceResult?.overrides || []), ...(encoded.sourceSkin || [])]),
+    matteOverrides: new Map([...(faceResult?.overrides || []), ...(encoded.sourceSkin || []), ...(encoded.sourceDngMattes || [])]),
     texturePeopleData: faceResult?.texturePeopleData,
   });
   for (const [iid, payload] of texturePayloads) payloads.set(iid, payload);
-  const portraitResult=installPortraitMatte(meta,payloads,null,null,faceResult?.overrides?.get(MATTE_URIS.portraiteffectsmatte),primary);
+  const portraitResult=installPortraitMatte(meta,payloads,null,null,encoded.sourceDngMattes?.get(MATTE_URIS.portraiteffectsmatte)
+    ||faceResult?.overrides?.get(MATTE_URIS.portraiteffectsmatte),primary);
   meta=portraitResult.meta;
+  meta=compactItemProperties(meta).meta;
 
   const iloc = parseIloc(meta, topBox(meta, "meta"));
   const ids = [...iloc.items].filter(([, item]) => item.constructionMethod === 0 && item.extents.length)
@@ -636,16 +631,20 @@ export function buildRasterHeic(profile, encoded, sortedLuma = null, faceResult 
 }
 
 export async function importRaster(file, profile, onProgress = () => {}, {
-  faces = false, sourceExif = null, sourceDepth = null, sourceSkin = null, heicAnalysis = null,
+  faces = false, sourceExif = null, sourceDepth = null, sourceSkin = null, heicAnalysis = null, dngBytes = null,
 } = {}) {
   if (!await supportedHevcConfig(TILE, TILE, 3_000_000))
     throw new Error("HEVC WebCodecs encoder unavailable for raster import");
-  if (!sourceExif) sourceExif = extractRasterExif(new Uint8Array(await file.arrayBuffer()));
-  const opened = heicAnalysis
+  if (!sourceExif && !dngBytes) sourceExif = extractRasterExif(new Uint8Array(await file.arrayBuffer()));
+  // Previous files may have left either runtime warm; free those heaps before RAW development.
+  if(dngBytes){releaseHevcEncoder();await releaseOrtModels();}
+  const opened = dngBytes ? await decodeDng(dngBytes, onProgress, {consume: true}) : heicAnalysis
     ? await openHeicSource(file, heicAnalysis.bytes, {decoder: heicAnalysis.decoder, onProgress})
     : await openBrowserImage(file, onProgress);
   const image = opened.image;
   try {
+    if (dngBytes) {sourceExif = opened.sourceExif; onProgress({stage: 'dngReady', image});}
+    if(!dngBytes){if(typeof profile==='function')profile=await profile();await generateSyntheticHevc(onProgress);}
     onProgress({ stage: "prepare", width: image.width, height: image.height });
     // Re-encoding keeps its native input surface, but HEIC analysis must obey
     // the same selected decoder as the primary-preserving processing route.
@@ -665,20 +664,29 @@ export async function importRaster(file, profile, onProgress = () => {}, {
       }
     }
     let faceResult = { state: "skipped", overrides: new Map(), faces: 0 };
+    const nativeDng=await prepareDngMattes(opened.sourceDng,image,onProgress);
+    if(dngBytes)releaseHevcEncoder();
     if (faces && !analysisImage) faceResult = {state: "unavailable", overrides: new Map(), faces: 0,
       portraitError: analysisError || "HEIC analysis unavailable"};
     const onFaceProgress = detail => onProgress({stage: "faces", detail});
     if (faces && analysisImage) {
-      try { faceResult = await generateRasterFaceMattes(analysisImage, 270, null, {onProgress: onFaceProgress}); }
+      try { faceResult = await generateRasterFaceMattes(analysisImage, 270, null, {onProgress: onFaceProgress,
+        nativeMasks:nativeDng.masks,nativeEncoded:nativeDng.encoded}); }
       catch (error) {
         console.warn("raster face matte generation unavailable:", error);
         faceResult = { state: "unavailable", overrides: new Map(), faces: 0,
+          unavailableReason:/out of memory|memory allocation failed/i.test(error.message)?'memory':null,
           portraitError: error.skipPortraitFallback ? error.message : null };
       }
     }
-    if(faces&&!faceResult.portraitError&&!faceResult.overrides.has(MATTE_URIS.portraiteffectsmatte)){
+    if(faces&&!nativeDng.encoded.has(MATTE_URIS.portraiteffectsmatte)&&!faceResult.portraitError&&!faceResult.overrides.has(MATTE_URIS.portraiteffectsmatte)){
       try{const portrait=await generateRasterFaceMattes(analysisImage,270,null,{portraitOnly:true,onProgress:onFaceProgress});for(const [uri,value] of portrait.overrides)faceResult.overrides.set(uri,value);}
       catch(e){faceResult.portraitError=e.message;}
+    }
+    if(dngBytes){
+      await releaseOrtModels();
+      if(typeof profile==='function')profile=await profile();
+      await generateSyntheticHevc(onProgress);
     }
     const geometry = targetGeometry(image);
     const linearThumbnail = await encodeLinearThumbnail(image, { angle: 270 }, onProgress);
@@ -701,16 +709,19 @@ export async function importRaster(file, profile, onProgress = () => {}, {
       main: main.chunks, mainHvcc: main.hvcc, mainColr: main.colr,
       thumb: thumb.chunks[0], thumbHvcc: thumb.hvcc, thumbColr: thumb.colr,
       hdr: hdr.chunks[0], hdrHvcc: hdr.hvcc, hdrColr: hdr.colr,
-      sourceExif, sourceDepth, sourceSkin,
+      sourceExif, sourceDepth, sourceSkin,sourceDngMattes:nativeDng.encoded,
       linearThumbnail,
     };
     const luma = analysisImage && (!heicAnalysis || heicAnalysis.sceneStats) ? sceneLuma(analysisImage) : null;
     // Reuse the original main/HDR/thumbnail encodes when correcting generated faces.
-    const rebuild = updated => buildRasterHeic(profile, encoded, luma, updated, geometry);
-    const data = rebuild(faceResult);
+    const rebuild = async updated => {
+      await generateSyntheticHevc(onProgress);
+      return buildRasterHeic(profile, encoded, luma, updated, geometry);
+    };
+    const data = await rebuild(faceResult);
     return { data, rebuild, source: { width: image.width, height: image.height }, faceResult, geometry,
-      portraitMatte:{mode:faceResult.overrides.has(MATTE_URIS.portraiteffectsmatte)?'target-person-segmentation':faces?'omitted-unavailable':'omitted-disabled',donorPlaceholderUsed:false,error:faceResult.portraitError},
+      portraitMatte:{mode:nativeDng.encoded.has(MATTE_URIS.portraiteffectsmatte)?'native-dng-reencoded':faceResult.overrides.has(MATTE_URIS.portraiteffectsmatte)?'target-person-segmentation':faces?'omitted-unavailable':'omitted-disabled',donorPlaceholderUsed:false,error:faceResult.portraitError},
       linearThumbnail: { mode: linearThumbnail.mode, bitDepth: linearThumbnail.bitDepth, transportColor: linearThumbnail.transportColor, sourcePixels: linearThumbnail.sourcePixels,
         width: linearThumbnail.width, height: linearThumbnail.height } };
-  } finally { opened.close(); }
+  } finally {try{if(dngBytes)await releaseOrtModels();}finally{opened.close();}}
 }

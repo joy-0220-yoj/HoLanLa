@@ -1,6 +1,6 @@
 {
   "name": "holanla",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "HoLanLa browser photographic style tool",
@@ -10,12 +10,15 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test tests/web/check-pwa.mjs tests/web/check-i18n.mjs tests/web/decoder.mjs tests/web/icc-color.mjs tests/web/webcodecs-color.mjs tests/web/errors.mjs tests/web/face-mattes.mjs tests/web/hevc-color.mjs tests/web/hevc-encoder.mjs tests/web/isolation.mjs tests/web/legacy-skin.mjs tests/web/native-mattes.mjs tests/web/orientation-properties.mjs tests/web/person-metadata.mjs tests/web/raster-color.mjs tests/web/raster-import.mjs tests/web/raster-metadata.mjs tests/web/texture-offsets.mjs tests/web/model-loading.mjs tests/web/vision-cache.mjs tests/web/model-cache-management.mjs",
+    "test": "node --test tests/web/check-pwa.mjs tests/web/check-i18n.mjs tests/web/decoder.mjs tests/web/dng.mjs tests/web/icc-color.mjs tests/web/webcodecs-color.mjs tests/web/errors.mjs tests/web/face-mattes.mjs tests/web/hevc-color.mjs tests/web/hevc-encoder.mjs tests/web/generated-profile.mjs tests/web/property-compaction.mjs tests/web/isolation.mjs tests/web/legacy-skin.mjs tests/web/native-mattes.mjs tests/web/orientation-properties.mjs tests/web/person-metadata.mjs tests/web/raster-color.mjs tests/web/raster-import.mjs tests/web/raster-metadata.mjs tests/web/texture-offsets.mjs tests/web/model-loading.mjs tests/web/vision-cache.mjs tests/web/model-cache-management.mjs tests/web/ort-vision.mjs",
+    "test:profiles:browser": "node tests/web/generated-profile-browser.mjs",
     "test:browser": "node tests/web/basic-workflow-browser.mjs",
+    "test:dng:browser": "node tests/web/dng-browser.mjs",
     "test:decoder:browser": "node tests/web/decoder-browser.mjs",
-    "test:models:browser": "node tests/web/model-loading-browser.mjs",
+    "test:models:browser": "node tests/web/ort-vision-browser.mjs",
     "test:models:restart": "node tests/web/model-cache-restart-browser.mjs",
     "test:layout:browser": "node tests/web/result-layout-browser.mjs",
-    "test:options:browser": "node tests/web/model-options-browser.mjs"
+    "test:options:browser": "node tests/web/model-options-browser.mjs",
+    "test:ort:browser": "node tests/web/ort-vision-browser.mjs"
   }
 }

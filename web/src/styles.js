@@ -1,7 +1,7 @@
 // Photographic Styles plist edits: scene statistics, c/d light maps, person hint.
 // The calibration constants come from eight native files; see the Python source.
 
-import { parseBplist, buildBplist } from "./bplist.js?v=0.7.0";
+import { parseBplist, buildBplist } from "./bplist.js?v=0.8.0";
 
 export const LIGHTMAP_N = 32;
 export const LIGHTMAP_FLOOR = 0.040741;

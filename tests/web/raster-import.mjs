@@ -1,14 +1,15 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
+import "./synthetic-fixtures.mjs";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { loadProfile } from "../../web/src/zip.js";
-import { topBox, boxes } from "../../web/src/box.js";
+import { topBox, boxes, metaChildren, box, concat, be } from "../../web/src/box.js";
 import {
   buildRasterHeic, extractPortraitDepth, targetGeometry,
 } from "../../web/src/raster-import.js";
 import {
   discoverHeic, extractItem, propertyBoxBytes, auxUriForItem, dimensionsForItem,
-  auxcBox, DEPTH_URI, parseIloc,
+  auxcBox, DEPTH_URI, parseIloc, addItems, MATTE_URIS, extractItemData,
 } from "../../web/src/heif.js";
+import {isolatePrimaryImage, isolateImageItem} from "../../web/src/primary-source.js";
 import { readExifOrientation, extractAppleMakerNoteTag } from "../../web/src/exif.js";
 import { hasTexture, MATTE_2026_URIS } from "../../web/src/texture.js";
 import { buildHeicInspection, INSPECTION_NAMES } from "../../web/src/native-mattes.js";
@@ -24,8 +25,20 @@ function gridDescriptor(data, iid) {
   return data.slice(start, start + extent.length);
 }
 
-const profile = await loadProfile(new Uint8Array(await readFile("web/profiles/48-12.zip")));
+const profile = await generatedProfileFixture('48-12');
+// An explicitly synthetic, container-only tmap keeps optional tone-map branches
+// covered; production generated profiles intentionally have no donor tmap.
+const beforeTmap = discoverHeic(profile.meta);
+let assigned;
+[profile.meta, assigned] = addItems(profile.meta, [{key: 'test-tmap', itemType: 'tmap',
+  reuse: beforeTmap.props.associations.get(beforeTmap.primary).map(a => [a.index, a.essential]),
+  refType: 'dimg', refTo: [beforeTmap.primary, beforeTmap.hdrGrid]}]);
+profile.retained.set(assigned.get('test-tmap'), new Uint8Array([0]));
 const donor = discoverHeic(profile.meta);
+const oldMaskIds = new Set([...donor.infos.keys()].filter(id =>
+  Object.values(MATTE_URIS).includes(auxUriForItem(donor.props, id))));
+const oldPeopleIds = [...oldMaskIds, ...donor.refs.filter(ref =>
+  ref.type === 'cdsc' && ref.to.some(id => oldMaskIds.has(id))).map(ref => ref.from)];
 const sample = (value) => new Uint8Array([0, 0, 0, value]);
 const output = buildRasterHeic(profile, {
   main: Array.from({ length: 48 }, (_, i) => sample(i)),
@@ -46,7 +59,7 @@ assert.deepEqual(
 assert.equal(hasTexture(result.infos), true);
 const uris = new Set([...result.infos.keys()].map((iid) => auxUriForItem(result.props, iid)));
 for (const uri of MATTE_2026_URIS) assert.equal(uris.has(uri), true, `missing ${uri}`);
-for (const iid of [96, 97, 98, 99, 100, 101]) assert.equal(result.infos.has(iid), false);
+for (const iid of oldPeopleIds) assert.equal(result.infos.has(iid), false, 'template people masks and sidecars are removed');
 const inspection = await buildHeicInspection(output, result);
 assert.equal(new Set(INSPECTION_NAMES).size, INSPECTION_NAMES.length);
 for (const name of ["HDR gain map", "style delta map", "tmap", "styles", "texture_styles",
@@ -144,3 +157,63 @@ assert.deepEqual(capturedDepth.payload, depthPayload);
 assert.deepEqual(capturedDepth.sidecars[0].payload, depthXmp);
 
 console.log("Raster import container, Exif, Portrait depth, Texture, semantic items, and inspection are consistent.");
+
+// Camera/Photos files can store mdat before meta. Use synthetic bytes to test
+// both box orders and payloads on both sides, without publishing private photos.
+function sourceLayout(order, baseOffsets = false) {
+  const original = discoverHeic(output), mdat = topBox(output, 'mdat');
+  const ftypBox = topBox(output, 'ftyp'), ftyp = output.slice(ftypBox.off, ftypBox.off + ftypBox.size);
+  const payload = output.slice(mdat.off + mdat.hdr, mdat.off + mdat.size);
+  let meta = output.slice(original.meta.off, original.meta.off + original.meta.size);
+  if (baseOffsets) {
+    const entries = [...original.iloc.items].map(([id, item]) => {
+      const base = item.constructionMethod === 0 ? item.baseOffset + item.extents[0].offset : item.baseOffset;
+      return concat([be(id, 2), be(item.constructionMethod, 2), be(0, 2), be(base, 4), be(item.extents.length, 2),
+        ...item.extents.map(e => concat([be(item.baseOffset + e.offset - base, 4), be(e.length, 4)]))]);
+    });
+    const iloc = box('iloc', concat([new Uint8Array([1, 0, 0, 0, 0x44, 0x40]), be(entries.length, 2), ...entries]));
+    const m = topBox(meta, 'meta');
+    meta = box('meta', concat([meta.slice(m.hdr, m.hdr + 4),
+      ...metaChildren(meta, m).map(child => child.type === 'iloc' ? iloc : meta.slice(child.off, child.off + child.size))]));
+  }
+  const cut = order === 'before' ? payload.length : order === 'after' ? 0
+    : original.iloc.items.get(original.primaryTiles[0]).extents[0].length;
+  const before = cut ? box('mdat', payload.slice(0, cut)) : new Uint8Array();
+  const after = cut < payload.length ? box('mdat', payload.slice(cut)) : new Uint8Array();
+  const iloc = parseIloc(meta, topBox(meta, 'meta'));
+  const relocated = start => {
+    const relative = start - mdat.off - mdat.hdr;
+    return relative < cut ? ftyp.length + 8 + relative
+      : ftyp.length + before.length + meta.length + 8 + relative - cut;
+  };
+  for (const [id, item] of iloc.items) if (item.constructionMethod === 0) {
+    const old = original.iloc.items.get(id);
+    const base = baseOffsets ? relocated(old.baseOffset + old.extents[0].offset) : 0;
+    if (baseOffsets) meta.set(be(base, 4), item.extents[0].offsetPos - 6);
+    item.extents.forEach((extent, i) => meta.set(be(relocated(old.baseOffset + old.extents[i].offset) - base, 4), extent.offsetPos));
+  }
+  return concat([ftyp, before, meta, after]);
+}
+for (const order of ['before', 'after', 'both']) for (const baseOffsets of [false, true]) {
+  const input = sourceLayout(order, baseOffsets), untouched = input.slice(), before = discoverHeic(input);
+  for (const [iid, isolate] of [[before.primary, isolatePrimaryImage], [before.primary, isolateImageItem], [before.hdrGrid, isolateImageItem]]) {
+    const result = isolate(input, iid), after = discoverHeic(result);
+    assert.equal(after.primary, iid);
+    for (const id of after.infos.keys()) {
+      assert.deepEqual(extractItemData(result, after, id), extractItemData(input, before, id), `${order}: preserved payload ${id}`);
+      for (const type of ['colr', 'hvcC', 'ispe', 'pixi', 'irot', 'imir'])
+        assert.deepEqual(propertyBoxBytes(result, after.props, id, type), propertyBoxBytes(input, before.props, id, type));
+    }
+    assert.deepEqual(input, untouched, 'isolation must not mutate source bytes');
+  }
+}
+for (const baseOffsets of [false, true]) for (const position of ['inside', 'crossing', 'outside']) {
+  const bad = sourceLayout('before', baseOffsets), d = discoverHeic(bad);
+  const item = d.iloc.items.get(d.primaryTiles[0]), extent = item.extents[0];
+  const start = position === 'inside' ? d.meta.off + 1 : position === 'crossing' ? d.meta.off - 2 : bad.length + 1;
+  bad.set(be(start, 4), baseOffsets ? extent.offsetPos - 6 : extent.offsetPos);
+  const expected = position === 'outside' ? /payload exceeds file bounds/ : /payload overlaps metadata/;
+  assert.throws(() => isolatePrimaryImage(bad), expected);
+  assert.throws(() => isolateImageItem(bad, d.primary), expected);
+}
+console.log('Primary/auxiliary isolation preserves payloads before, after and around meta; rejects real overlap and out-of-bounds extents.');

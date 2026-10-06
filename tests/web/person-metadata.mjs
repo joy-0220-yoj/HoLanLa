@@ -1,6 +1,6 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
+import "./synthetic-fixtures.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { loadProfile } from "../../web/src/zip.js";
 import { parseBplist } from "../../web/src/bplist.js";
 import { topBox } from "../../web/src/box.js";
 import {
@@ -38,7 +38,7 @@ const meshWithoutIris = Array.from({ length: 468 }, (_, i) => ({ x: i, y: i * 2,
 assert.deepEqual(appleLandmarkPoint(meshWithoutIris, 6),
   { x: 781 / 6, y: 781 / 3, z: 0 }, "left iris centre has a 468-point model fallback");
 
-const profile = await loadProfile(new Uint8Array(readFileSync("web/profiles/48-12.zip")));
+const profile = await generatedProfileFixture('48-12');
 const donorStyles = profile.retained.get(Number(profile.manifest.donor_styles_item));
 const [v16Styles, upgraded] = upgradeStylesV16(donorStyles);
 const parsedV16 = parseBplist(v16Styles);

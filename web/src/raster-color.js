@@ -1,5 +1,5 @@
 // Explicit RGB -> limited-range BT.709 YCbCr, avoiding implicit canvas VideoFrame conversion.
-import { be, box, concat } from "./box.js?v=0.7.0";
+import { be, box, concat } from "./box.js?v=0.8.0";
 
 export function rasterVideoColorSpace(canvasSpace = "srgb") {
   return { primaries: canvasSpace === "display-p3" ? "smpte432" : "bt709",

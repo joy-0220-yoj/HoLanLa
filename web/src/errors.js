@@ -5,7 +5,9 @@
 export function diagnosePortError(error) {
   const message = String(error?.message || error || "Unknown error");
   const lower = message.toLowerCase();
-  if (/8-bit linear thumbnail/.test(lower))
+  if (/dng jpeg xl compression unsupported/.test(lower)) return {code: 'dngCompression', detail: ''};
+  if (/dng decode failed/.test(lower)) return {code: 'dng', detail: message};
+  if (/(?:8|10)-bit linear thumbnail/.test(lower))
     return { code: "linear8", detail: message };
   if (/heic source decode failed/.test(lower))
     return { code: "heicDecode", detail: message };

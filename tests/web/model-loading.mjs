@@ -143,15 +143,19 @@ test("an initialization that finishes after timeout is closed", async () => {
 for (const lang of ["zh", "en"]) {
   test(`${lang} progress preserves a step timer and distinguishes download from initialization`, () => {
     const lines = [], values = [];
-    const ui = {set: (text, cls) => lines.push({text, cls}), update: text => {lines.at(-1).text = text;},
+    const ui = {set: (text, cls, options) => lines.push({text, cls, options}), update: text => {lines.at(-1).text = text;},
       progress: value => values.push(value)};
     const T = key => STRINGS[lang][key];
-    const report = detail => updateModelProgress(ui, {stage: "modelDownload", resource: "face", ...detail}, T);
+    const report = detail => {
+      updateModelProgress(ui, {stage: 'faces', detail}, T);
+      return updateModelProgress(ui, {stage: "modelDownload", resource: "ortFace", ...detail}, T);
+    };
     report({loaded: 0, total: null});
     assert.equal(values.at(-1), undefined);
     assert.ok(!lines.at(-1).text.includes("%"));
     report({loaded: 2500000, total: 5000000});
     assert.equal(lines.length, 1);
+    updateModelProgress(ui, {stage:'codec',operation:'decode',source:'test'}, T);
     assert.match(lines.at(-1).text, /2.5 MB \/ 5.0 MB \(50%\)/);
     assert.equal(values.at(-1), 50);
     report({loaded: 5000000, total: 5000000});
@@ -159,22 +163,28 @@ for (const lang of ["zh", "en"]) {
     report({loaded: 5000000, total: 5000000, complete: true});
     assert.equal(values.at(-1), 100);
     assert.equal(lines.length, 1);
-    updateModelProgress(ui, {stage: "modelLoading", resource: "face", phase: "gpu"}, T);
+    updateModelProgress(ui, {stage: "modelLoading", resource: "ortFace", phase: "cpu"}, T);
     assert.equal(values.at(-1), undefined);
-    assert.match(lines.at(-1).text, /GPU/);
-    updateModelProgress(ui, {stage: "modelLoading", resource: "face", phase: "cpu"}, T);
     assert.match(lines.at(-1).text, /CPU/);
-    updateModelProgress(ui, {stage: "modelError", resource: "segmenter", reason: "stalled"}, T);
+    updateModelProgress(ui, {stage: "modelError", resource: "ortSegmenter", reason: "stalled"}, T);
     assert.match(lines.at(-1).text, /30/);
     assert.equal(lines.at(-1).cls, "err");
+    assert.equal(lines.at(-1).options.terminal,false,'a recoverable model error must not end the photo timer');
     assert.equal(values.at(-1), null);
-    updateModelProgress(ui, {stage: "modelCache", resource: "wasm", loaded: 0, complete: false}, T);
+    updateModelProgress(ui, {stage: "modelCache", resource: "ort", loaded: 0, complete: false}, T);
     assert.equal(values.at(-1), undefined);
-    updateModelProgress(ui, {stage: "modelCache", resource: "wasm", loaded: 9600000, complete: true}, T);
+    updateModelProgress(ui, {stage: "modelCache", resource: "ort", loaded: 9600000, complete: true}, T);
     assert.match(lines.at(-1).text, /9.6 MB/);
-    assert.ok(lines.at(-1).text.includes(T("model.wasm")));
+    assert.ok(lines.at(-1).text.includes(T("model.ort")));
     assert.equal(values.at(-1), null);
     assert.ok(!/下載|Downloaded/.test(lines.at(-1).text));
+    const count = lines.length;
+    updateModelProgress(ui, {stage:'faces'}, T);
+    updateModelProgress(ui, {stage:'modelCache',resource:'ort',url:'engine.js',loaded:1000,complete:true}, T);
+    updateModelProgress(ui, {stage:'faces'}, T);
+    updateModelProgress(ui, {stage:'modelCache',resource:'ort',url:'engine.wasm',loaded:10000000,complete:true}, T);
+    assert.equal(lines.length,count,'nested events and separate engine assets reuse one step');
+    assert.match(lines.at(-1).text,/19.6 MB/);
     assert.equal(updateModelProgress(ui, {stage: "detect"}, T), false);
     assert.ok(lines.every(line => !/undefined|\{\w+\}/.test(line.text)));
   });

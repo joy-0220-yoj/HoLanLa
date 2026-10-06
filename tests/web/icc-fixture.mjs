@@ -3,9 +3,11 @@
 import {concat,be} from "../../web/src/box.js";
 const ascii = text => new TextEncoder().encode(text);
 const fixed = value => be(Math.round(value*65536)>>>0,4);
-export function iccFixture({space="srgb",linear=false,sampled=false,lut=false,gamma=null,identity=false}={}) {
+export function iccFixture({space="srgb",linear=false,sampled=false,lut=false,gamma=null,identity=false,appleP3=false}={}) {
   const xyz = values => concat([ascii("XYZ "),new Uint8Array(4),...values.map(fixed)]);
-  const columns = space === "p3"
+  const columns = appleP3
+    ? [[0x83dc,0x3dbd,-0x45],[0x4abd,0xb136,0xab9],[0x283d,0x110c,0xc8d8]].map(c=>c.map(v=>v/65536))
+    : space === "p3"
     ? [[0x83df,0x3dbf,-0x45],[0x4abf,0xb137,0xab9],[0x2838,0x110b,0xc8b9]].map(c=>c.map(v=>v/65536))
     : [[0.4360747,0.2225045,0.0139322],[0.3850649,0.7168786,0.0971045],[0.1430804,0.0606169,0.7141733]];
   let curve;
@@ -26,7 +28,9 @@ export function iccFixture({space="srgb",linear=false,sampled=false,lut=false,ga
   };
   let entries = [["desc",mluc(space === "p3" ? "Display P3" : "sRGB")],["cprt",mluc("Synthetic test profile")],
     ["wtpt",xyz([0.9642,1,0.8249])],...["rXYZ","gXYZ","bXYZ"].map((name,i)=>[name,xyz(columns[i])]),
-    ["chad",concat([ascii("sf32"),new Uint8Array(4),...[0x10c42,0x5de,-0xcda,0x793,0xfd90,-0x45e,-0x25d,0x3dc,0xc06e].map(v=>be(v>>>0,4))])],
+    ["chad",concat([ascii("sf32"),new Uint8Array(4),...(appleP3
+      ? [0x10c3d,0x5dc,-0xcd5,0x790,0xfd90,-0x45d,-0x25d,0x3da,0xc08c]
+      : [0x10c42,0x5de,-0xcda,0x793,0xfd90,-0x45e,-0x25d,0x3dc,0xc06e]).map(v=>be(v>>>0,4))])],
     ["rTRC",curve],["gTRC",curve],["bTRC",curve]];
   if(space==="gray")entries=[["desc",mluc("Gray profile")],["cprt",mluc("Synthetic test profile")],
     ["wtpt",xyz([0.9642,1,0.8249])],["kTRC",curve]];

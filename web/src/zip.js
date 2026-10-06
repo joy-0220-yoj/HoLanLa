@@ -2,7 +2,29 @@
 // only, which is all the profiles use. Inflate comes from DecompressionStream,
 // available in browsers and Node 18+.
 
-import { u } from "./box.js?v=0.7.0";
+import { u, concat } from "./box.js?v=0.8.0";
+
+// Deterministic stored ZIP writer for profiles generated in the browser.
+export function writeZip(files) {
+  const le = (value, length) => Uint8Array.from({length}, (_, i) => (value >>> (i * 8)) & 255);
+  const crc32 = bytes => {
+    let crc = 0xffffffff;
+    for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0); }
+    return (crc ^ 0xffffffff) >>> 0;
+  };
+  const local = [], central = []; let offset = 0;
+  for (const [name, bytes] of files) {
+    const filename = new TextEncoder().encode(name), crc = crc32(bytes);
+    const record = concat([le(0x04034b50, 4), le(20, 2), le(0x800, 2), le(0, 2), le(0, 2), le(33, 2),
+      le(crc, 4), le(bytes.length, 4), le(bytes.length, 4), le(filename.length, 2), le(0, 2), filename, bytes]);
+    central.push(concat([le(0x02014b50, 4), le(20, 2), le(20, 2), le(0x800, 2), le(0, 2), le(0, 2), le(33, 2),
+      le(crc, 4), le(bytes.length, 4), le(bytes.length, 4), le(filename.length, 2), le(0, 2), le(0, 2), le(0, 2), le(0, 2), le(0, 4), le(offset, 4), filename]));
+    local.push(record); offset += record.length;
+  }
+  const directory = concat(central);
+  return concat([...local, directory, le(0x06054b50, 4), le(0, 2), le(0, 2), le(files.size, 2), le(files.size, 2),
+    le(directory.length, 4), le(offset, 4), le(0, 2)]);
+}
 
 const u16le = (d, p) => d[p] | (d[p + 1] << 8);
 const u32le = (d, p) => (d[p] | (d[p + 1] << 8) | (d[p + 2] << 16)) + d[p + 3] * 0x1000000;

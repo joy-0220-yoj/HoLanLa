@@ -3,7 +3,7 @@
 
 import {
   boxes, topBox, metaChildren, findChild, u, be, box, concat, cstring, slice, bytesEqual,
-} from "./box.js?v=0.7.0";
+} from "./box.js?v=0.8.0";
 
 export const URI_HDR_GAIN = "urn:com:apple:photo:2020:aux:hdrgainmap";
 export const URI_LINEAR_THUMB = "tag:apple.com,2023:photo:aux:linearthumbnail";
@@ -371,7 +371,17 @@ export function replaceItemPropertyWithSource(meta, iid, type, sourceBox) {
   const props = parseIpcoIpma(meta, topBox(meta, "meta"));
   const p = propertyForItem(props, iid, type);
   if (!p) return meta;
-  return replaceIpcoProperty(meta, p.index, sourceBox, type);
+  // An interned property may belong to unrelated items. Repoint this item only.
+  let index;
+  [meta,index] = internIpcoProperty(meta,sourceBox);
+  return repointItemProperty(meta,iid,p.index,index);
+}
+
+/** Reuse an exactly equal property box; different values never share an index. */
+export function internIpcoProperty(meta,newBox) {
+  const props = parseIpcoIpma(meta,topBox(meta,'meta'));
+  const match = props.properties.find(p => bytesEqual(newBox,meta.subarray(p.box.off,p.box.off+p.box.size)));
+  return match ? [meta,match.index] : appendIpcoProperty(meta,newBox);
 }
 
 /** Append a property to ipco; every existing index stays valid. */
@@ -393,26 +403,15 @@ export function appendIpcoProperty(meta, newBox) {
   return [box("meta", concat(rebuilt)), props.properties.length + 1];
 }
 
-/** Point one item's association from oldIndex to newIndex, in place. */
+/** Repoint without truncating indexes: promote every ipma entry to 15 bits when needed. */
 export function repointItemProperty(meta, iid, oldIndex, newIndex) {
   const props = parseIpcoIpma(meta, topBox(meta, "meta"));
-  if (props.flags & 1) throw new Error("Wide ipma editing is not supported");
-  const ipma = props.ipmaBox;
-  const out = meta.slice();
-  let p = ipma.off + ipma.hdr + 8;
-  const iidSize = props.version === 0 ? 2 : 4;
-  const entryCount = u(meta, ipma.off + ipma.hdr + 4, 4);
-  for (let i = 0; i < entryCount; i++) {
-    const cur = u(meta, p, iidSize);
-    p += iidSize;
-    const count = out[p];
-    p += 1;
-    for (let a = 0; a < count; a++) {
-      if (cur === iid && (out[p] & 0x7f) === oldIndex) out[p] = (out[p] & 0x80) | newIndex;
-      p += 1;
-    }
-  }
-  return out;
+  if (!Number.isInteger(newIndex) || newIndex < 1 || newIndex > props.properties.length || newIndex > 0x7fff)
+    throw new Error(`Invalid property index ${newIndex}`);
+  const current = props.associations.get(iid) || [];
+  if (!current.some(a => a.index === oldIndex)) return meta;
+  return setItemPropertyAssociations(meta, iid,
+    current.map(a => [a.index === oldIndex ? newIndex : a.index, a.essential]));
 }
 
 /** Add one existing ipco property to an item's ipma association list. */
@@ -472,6 +471,45 @@ export function setItemPropertyAssociations(meta, iid, associations) {
   for (const child of boxes(meta, m.off + m.hdr + 4, m.off + m.size))
     rebuilt.push(child.type === "iprp" ? newIprp : slice(meta, child.off, child.size));
   return box("meta", concat(rebuilt));
+}
+
+/** Finalize metadata after all item edits: remove unused properties and merge
+ * byte-identical boxes, preserving each item's association order/essential flags.
+ * The caller must repair external iloc offsets after meta changes size. */
+export function compactItemProperties(meta) {
+  const m = topBox(meta,'meta'), props = parseIpcoIpma(meta,m);
+  const used = new Set([...props.associations.values()].flat().map(a=>a.index));
+  for (const index of used) if (index<1 || index>props.properties.length)
+    throw Error(`Invalid property index ${index}`);
+  const unique = [], buckets = new Map(), remap = new Map();
+  let unused = 0, duplicates = 0;
+  for (const p of props.properties) {
+    if (!used.has(p.index)) { unused++; continue; }
+    const raw = meta.subarray(p.box.off,p.box.off+p.box.size), key = `${p.type}:${raw.length}`;
+    const bucket = buckets.get(key) || [];
+    const existing = bucket.find(entry=>bytesEqual(entry.raw,raw));
+    if (existing) { remap.set(p.index,existing.index); duplicates++; }
+    else {
+      const entry = {raw,index:unique.length+1}; unique.push(entry); bucket.push(entry);
+      buckets.set(key,bucket); remap.set(p.index,entry.index);
+    }
+  }
+  const wide = unique.length>127, iidSize = props.version===0?2:4;
+  if (unique.length>0x7fff) throw Error('Too many HEIF properties');
+  const header = meta.slice(props.ipmaBox.off+props.ipmaBox.hdr,props.ipmaBox.off+props.ipmaBox.hdr+4);
+  header[3] = (header[3]&0xfe) | Number(wide);
+  const entries = [...props.associations].map(([id,list])=>concat([
+    be(id,iidSize),new Uint8Array([list.length]),...list.map(a=>
+      be(remap.get(a.index) | (a.essential?(wide?0x8000:0x80):0),wide?2:1)),
+  ]));
+  const ipma = box('ipma',concat([header,be(entries.length,4),...entries]));
+  const ipco = box('ipco',concat(unique.map(p=>p.raw)));
+  const iprp = box('iprp',concat([...boxes(meta,props.iprpBox.off+props.iprpBox.hdr,props.iprpBox.off+props.iprpBox.size)]
+    .map(b=>b.type==='ipco'?ipco:b.type==='ipma'?ipma:meta.subarray(b.off,b.off+b.size))));
+  const result = box('meta',concat([meta.subarray(m.off+m.hdr,m.off+m.hdr+4),
+    ...metaChildren(meta,m).map(b=>b.type==='iprp'?iprp:meta.subarray(b.off,b.off+b.size))]));
+  return {meta:result,before:props.properties.length,after:unique.length,removedUnused:unused,
+    mergedDuplicates:duplicates,indexMap:remap};
 }
 
 // A 'mime' entry carries its content type, and a 'uri ' entry its URI, as a second

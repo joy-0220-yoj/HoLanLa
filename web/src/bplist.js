@@ -2,7 +2,7 @@
 // Only the types the Photographic Styles plist uses are handled: dict, string,
 // bool, int, real, data. That is the whole schema observed in native files.
 
-import { u, be, concat } from "./box.js?v=0.7.0";
+import { u, be, concat } from "./box.js?v=0.8.0";
 
 export function parseBplist(d) {
   if (String.fromCharCode(...d.subarray(0, 6)) !== "bplist")
@@ -105,6 +105,14 @@ export class BplistData {
   constructor(bytes) { this.bytes = bytes; }
 }
 
+// Keep integral floating-point constants (e.g. Apple schema 1.0) as real objects.
+export class BplistReal {
+  constructor(value) {
+    if (!Number.isFinite(value)) throw Error('Invalid binary plist real');
+    this.value = value;
+  }
+}
+
 export function buildBplist(root) {
   // Flatten the object graph. Values are not deduplicated except for the small
   // primitives where identity is unambiguous; Photos does not care either way.
@@ -118,6 +126,7 @@ export function buildBplist(root) {
       stringIndex.set(obj, i);
       return i;
     }
+    if (obj instanceof BplistReal) return objects.push({kind: 'real', value: obj.value}) - 1;
     if (obj instanceof Uint8Array) return objects.push({ kind: "data", value: obj }) - 1;
     if (typeof obj === "boolean") return objects.push({ kind: "bool", value: obj }) - 1;
     if (typeof obj === "number") {

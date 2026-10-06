@@ -1,6 +1,6 @@
-import { discoverHeic, extractItemData, auxUriForItem } from "./heif.js?v=0.7.0";
-import { bytesEqual } from "./box.js?v=0.7.0";
-import { parseBplist } from "./bplist.js?v=0.7.0";
+import { discoverHeic, extractItemData, auxUriForItem } from "./heif.js?v=0.8.0";
+import { bytesEqual } from "./box.js?v=0.8.0";
+import { parseBplist } from "./bplist.js?v=0.8.0";
 
 export function equalValues(a, b) {
   if (Object.is(a, b)) return true;

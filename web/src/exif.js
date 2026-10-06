@@ -1,8 +1,8 @@
 // Apple MakerNote surgery: preserve the target's Exif and inject only tag 0x54.
 // Port of the corresponding functions in photographic_style_port.py.
 
-import { concat, be } from "./box.js?v=0.7.0";
-import { TIFF_TYPE_SIZES } from "./heif.js?v=0.7.0";
+import { concat, be } from "./box.js?v=0.8.0";
+import { TIFF_TYPE_SIZES } from "./heif.js?v=0.8.0";
 
 const tiffU = (d, off, n, little) => {
   let v = 0;
@@ -213,11 +213,37 @@ export function extractRasterExif(data) {
   return null;
 }
 
-/** Keep source camera/GPS/date fields while adding the Apple style marker.
- * Append new IFD tables so all original TIFF-relative value offsets remain valid.
- * Output pixels use the raster pipeline's stored orientation, not source Orientation.
- */
+/** Minimal Apple Exif for newly encoded raster pixels (stored Orientation=6). */
+export function buildAppleStyleExif(mn54, makerType = 7) {
+  const bytes = text => new TextEncoder().encode(text);
+  const maker = concat([
+    bytes('Apple iOS'), new Uint8Array([0, 0, 1]), bytes('MM'), be(1, 2),
+    be(0x54, 2), be(makerType, 2), be(mn54.length, 4), be(32, 4),
+    be(0, 4), mn54,
+  ]);
+  const tiff = concat([
+    bytes('MM'), be(42, 2), be(8, 4), be(2, 2),
+    be(0x0112, 2), be(3, 2), be(1, 4), be(6, 2), be(0, 2),
+    be(0x8769, 2), be(4, 2), be(1, 4), be(38, 4), be(0, 4),
+    be(1, 2), be(0x927c, 2), be(7, 2), be(maker.length, 4), be(56, 4),
+    be(0, 4), maker,
+  ]);
+  return concat([be(6, 4), bytes('Exif\0\0'), tiff]);
+}
+
+/** Add the style marker without changing preserved HEIC pixels' Exif geometry. */
+export function ensureAppleStyleExif(sourceExif, mn54, makerType = 7) {
+  return preserveExifWithStyleMarker(sourceExif, buildAppleStyleExif(mn54, makerType),
+    {keepImageMetadata: true});
+}
+
+/** Keep source camera/GPS/date fields; use the newly encoded raster geometry. */
 export function preserveRasterExif(sourceExif, styleExif, {width, height} = {}) {
+  return preserveExifWithStyleMarker(sourceExif, styleExif, {width, height});
+}
+
+// Append IFD tables so all original TIFF-relative value offsets remain valid.
+function preserveExifWithStyleMarker(sourceExif, styleExif, {width, height, keepImageMetadata = false} = {}) {
   const parse = payload => {
     if (payload.length < 4) throw Error('Truncated source Exif');
     const start = tiffU(payload, 0, 4, false) + 4, tiff = payload.subarray(start);
@@ -242,7 +268,8 @@ export function preserveRasterExif(sourceExif, styleExif, {width, height} = {}) 
     const root = readIfd(tiffU(tiff, 4, 4, little)), pointer = root.get(0x8769);
     if (pointer && (tiffU(pointer, 2, 2, little) !== 4 || tiffU(pointer, 4, 4, little) !== 1))
       throw Error('Invalid source ExifIFD pointer');
-    return {start, tiff, little, root, exif: pointer ? readIfd(tiffU(pointer, 8, 4, little)) : new Map()};
+    const rootNext = tiffU(tiff, tiffU(tiff, 4, 4, little) + 2 + root.size * 12, 4, little);
+    return {start, tiff, little, root, rootNext, exif: pointer ? readIfd(tiffU(pointer, 8, 4, little)) : new Map()};
   };
   let work = sourceExif, source = parse(work), nativeApple = false;
   if (source.exif.has(0x927c)) {
@@ -251,10 +278,11 @@ export function preserveRasterExif(sourceExif, styleExif, {width, height} = {}) 
     if (nativeApple) {
       const marker = extractAppleMakerNoteTag(styleExif);
       work = injectAppleMakerNoteTag(work, marker.payload, 0x54, marker.type);
+      if (keepImageMetadata) return work;
       source = parse(work);
     }
   }
-  const {start, tiff, little, root, exif} = source;
+  const {start, tiff, little, root, rootNext, exif} = source;
   const entry = (tag, type, count, value) => concat([tiffBytes(tag, 2, little), tiffBytes(type, 2, little),
     tiffBytes(count, 4, little), tiffBytes(value, type === 3 ? 2 : 4, little), ...(type === 3 ? [new Uint8Array(2)] : [])]);
   const chunks = [tiff.slice()]; let length = tiff.length;
@@ -265,17 +293,17 @@ export function preserveRasterExif(sourceExif, styleExif, {width, height} = {}) 
     // the active MakerNote must contain Apple's 0x54 marker for style editing.
     exif.set(0x927c, entry(0x927c, 7, maker.length, off));
   }
-  root.set(0x0112, entry(0x0112, 3, 1, 6));
+  if (!keepImageMetadata) root.set(0x0112, entry(0x0112, 3, 1, 6));
   for (const [value, rootTag, exifTag] of [[width, 0x0100, 0xa002], [height, 0x0101, 0xa003]]) {
     if (!Number.isInteger(value) || value < 1 || value > 0xffffffff) continue;
     if (root.has(rootTag)) root.set(rootTag, entry(rootTag, 4, 1, value));
     exif.set(exifTag, entry(exifTag, 4, 1, value));
   }
-  const table = entries => concat([tiffBytes(entries.size, 2, little),
-    ...[...entries].sort(([a], [b]) => a - b).map(([, raw]) => raw), new Uint8Array(4)]);
+  const table = (entries, next = 0) => concat([tiffBytes(entries.size, 2, little),
+    ...[...entries].sort(([a], [b]) => a - b).map(([, raw]) => raw), tiffBytes(next, 4, little)]);
   const exifOff = append(table(exif)); root.set(0x8769, entry(0x8769, 4, 1, exifOff));
-  // HEIF supplies its own thumbnail; do not retain a stale TIFF thumbnail link.
-  const rootOff = append(table(root)), rebuilt = concat(chunks);
+  // Re-encoded raster pixels invalidate a TIFF thumbnail; preserved HEIC pixels do not.
+  const rootOff = append(table(root, keepImageMetadata ? rootNext : 0)), rebuilt = concat(chunks);
   rebuilt.set(tiffBytes(rootOff, 4, little), 4);
   return concat([work.subarray(0, start), rebuilt]);
 }

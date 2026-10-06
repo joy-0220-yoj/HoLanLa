@@ -1,24 +1,30 @@
-import { inspectionComparator } from "./src/inspection-compare.js?v=0.7.0";
-import { loadProfile } from "./src/zip.js?v=0.7.0";
-import { prepareIsolation } from "./src/isolation.js?v=0.7.0";
-import { patch, selectProfile, VERSION } from "./src/port.js?v=0.7.0";
+import { inspectionComparator } from "./src/inspection-compare.js?v=0.8.0";
+import {isDng} from './src/dng-tiff.js?v=0.8.0';
+import {buildDngInspection, dngLayerPreview, gainTableSlice} from './src/dng-inspection.js?v=0.8.0';
+import {dngInspectionEntry} from './src/dng-mattes.js?v=0.8.0';
+import {generateProfile, GENERATED_PROFILE_INDEX} from './src/generated-profile.js?v=0.8.0';
+import {generateSyntheticHevc} from './src/synthetic-hevc.js?v=0.8.0';
+import {onEncoderRelease, releaseHevcEncoder} from './src/ffmpeg-hevc.js?v=0.8.0';
+import {releaseOrtModels} from './src/ort-vision.js?v=0.8.0';
+import { prepareIsolation } from "./src/isolation.js?v=0.8.0";
+import { patch, selectProfile, VERSION } from "./src/port.js?v=0.8.0";
 import {
   discoverHeic, extractItem,
   irotAngleForItem, imirAxisForItem, auxUriForItem, MATTE_URIS,
-} from "./src/heif.js?v=0.7.0";
-import { addTexture, hasTexture, preferNativeSkin } from "./src/texture.js?v=0.7.0";
-import { decodeToRgb, decodeToDisplayCanvas } from "./src/decode.js?v=0.7.0";
-import { generateFaceMattes, rebuildFaceMattes } from "./src/face-mattes.js?v=0.7.0";
-import { updateModelProgress } from "./src/model-progress.js?v=0.7.0";
-import { listCachedModelFiles, deleteCachedModelFiles, MODEL_RESOURCE_KEYS } from "./src/model-cache.js?v=0.7.0";
+} from "./src/heif.js?v=0.8.0";
+import { addTexture, hasTexture, preferNativeSkin } from "./src/texture.js?v=0.8.0";
+import { decodeToRgb, decodeToDisplayCanvas } from "./src/decode.js?v=0.8.0";
+import { generateFaceMattes, rebuildFaceMattes } from "./src/face-mattes.js?v=0.8.0";
+import { updateModelProgress } from "./src/model-progress.js?v=0.8.0";
+import { listCachedModelFiles, deleteCachedModelFiles, MODEL_RESOURCE_KEYS } from "./src/model-cache.js?v=0.8.0";
 import {
   hasNativeFaceMattes, buildHeicInspection, INSPECTION_NAMES,
-} from "./src/native-mattes.js?v=0.7.0";
-import { diagnosePortError } from "./src/errors.js?v=0.7.0";
-import { pickLanguage, rememberLanguage, applyLanguage, t, ITEM_LABEL_KEYS } from "./src/i18n.js?v=0.7.0";
+} from "./src/native-mattes.js?v=0.8.0";
+import { diagnosePortError } from "./src/errors.js?v=0.8.0";
+import { pickLanguage, rememberLanguage, applyLanguage, t, ITEM_LABEL_KEYS } from "./src/i18n.js?v=0.8.0";
 import {
   importRaster, extractPortraitDepth, prepareHeicAuxiliaries, prepareHeicLinearThumbnail,
-} from "./src/raster-import.js?v=0.7.0";
+} from "./src/raster-import.js?v=0.8.0";
 
 const $ = (id) => document.getElementById(id);
 const isolationReady = prepareIsolation();
@@ -58,7 +64,6 @@ function prepareFile(file) {
   ui.set(T("st.queued"));
   return enqueue(async () => {
     await isolationReady;
-    if (!profileIndex) profileIndex = await (await fetch("profiles/index.json")).json();
     await handleFile(file, ui);
   }).catch(error => ui.set(`${T("err.unexpected")} (${error.message})`, "err"))
     .finally(() => { if ($("model-cache").open) void refreshModelCache(); });
@@ -87,7 +92,10 @@ function closeComparison() {
 function inspectionCell(entry) {
   const cell = document.createElement("div");
   cell.className = `inspection-cell ${entry?.present ? "present" : "missing"}`;
-  if (!entry?.present) { cell.textContent = T("inspect.missing"); return cell; }
+  if (!entry?.present) {
+    cell.textContent = T(entry?.notComparable?'dnginspect.noEquivalent':entry?.dngMask?'dnginspect.maskMissing':"inspect.missing");
+    return cell;
+  }
   const badge = document.createElement("div");
   badge.className = "inspection-badge";
   badge.textContent = entry.itemIds?.length
@@ -136,6 +144,67 @@ function inspectionCell(entry) {
   return cell;
 }
 
+function renderDngInspection(inspection) {
+  const panel=document.createElement('section');panel.className='dng-inspection inspection-comparison-hint';
+  const title=document.createElement('h3'),hint=document.createElement('p');
+  title.textContent=T('dnginspect.title');hint.textContent=T('dnginspect.hint');panel.append(title,hint);
+  for(const layer of inspection.layers){
+    const details=document.createElement('details');details.className='dng-layer';details.dataset.kind=layer.kind;
+    details.open=layer.kind!=='metadata';
+    const summary=document.createElement('summary'),kind=layer.semantic||T(`dnginspect.${layer.kind}`);
+    summary.textContent=`${layer.path} · ${kind}${layer.width?` · ${layer.width} × ${layer.height}`:''}`;details.append(summary);
+    if(layer.kind==='raw'){const note=document.createElement('p');note.textContent=T('dnginspect.rawHint');details.append(note);}
+    if(layer.sources?.length){
+      const button=document.createElement('button');button.type='button';button.className='dl alt dng-layer-preview';
+      button.textContent=T('dnginspect.showImage');details.append(button);
+      button.addEventListener('click',async()=>{
+        button.disabled=true;
+        try{
+          const blob=await dngLayerPreview(layer);if(!panel.isConnected)return;
+          const url=URL.createObjectURL(blob);compareUrls.push(url);
+          const img=document.createElement('img');img.src=url;img.alt=kind;details.append(img);
+          const link=document.createElement('a');link.href=url;link.download=`DNG_IFD_${layer.id}.png`;
+          link.className='dl alt';link.textContent=T('btn.debugDownload');details.append(link);button.remove();
+        }catch(error){if(panel.isConnected){const note=document.createElement('p');note.className='err';note.textContent=`${T('inspect.decodeFailed')}: ${error.message}`;details.append(note);}}
+      });
+    }
+    if(layer.gainTable){
+      const table=layer.gainTable,heading=document.createElement('p'),image=document.createElement('canvas');
+      heading.textContent=T('dnginspect.gainHint');image.width=table.cols;image.height=table.rows;image.className='dng-gain-map';
+      const range=document.createElement('input'),label=document.createElement('label');
+      range.type='range';range.min='0';range.max=String(table.levels-1);range.value=String(Math.floor(table.levels/2));
+      range.setAttribute('aria-label','ProfileGainTableMap');
+      const paint=()=>{
+        const level=Number(range.value),values=gainTableSlice(table,level),ctx=image.getContext('2d'),rgba=ctx.createImageData(table.cols,table.rows);
+        for(let i=0;i<values.length;i++){
+          const n=Math.round(Math.max(0,Math.min(1,(Math.log2(Math.max(values[i],1e-9))+3)/6))*255);
+          rgba.data.set([n,n,n,255],i*4);
+        }
+        ctx.putImageData(rgba,0,0);label.textContent=T('dnginspect.gainLevel').replace('{level}',level).replace('{max}',table.levels-1);
+      };
+      range.addEventListener('input',paint);paint();details.append(heading,image,label,range);
+    }
+    if(layer.toneCurve){
+      const heading=document.createElement('p'),image=document.createElement('canvas');heading.textContent='ProfileToneCurve';
+      image.width=320;image.height=180;const ctx=image.getContext('2d');ctx.fillStyle='#101726';ctx.fillRect(0,0,320,180);
+      ctx.strokeStyle='#ffc18e';ctx.beginPath();
+      for(let i=0;i<layer.toneCurve.length;i+=2){
+        const x=layer.toneCurve[i]*319,y=(1-layer.toneCurve[i+1])*179;
+        if(!Number.isFinite(x)||!Number.isFinite(y))continue;
+        if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+      }
+      ctx.stroke();details.append(heading,image);
+    }
+    const metadata=document.createElement('details'),label=document.createElement('summary'),pre=document.createElement('pre');
+    label.textContent=T('inspect.metadata');
+    const {sources,gainTable,toneCurve,...values}=layer;
+    pre.textContent=JSON.stringify({...values,gainTable:gainTable?{rows:gainTable.rows,cols:gainTable.cols,levels:gainTable.levels,
+      spacing:gainTable.spacing,origin:gainTable.origin,inputWeights:gainTable.inputWeights}:undefined},null,2);
+    metadata.append(label,pre);details.append(metadata);panel.append(details);
+  }
+  return panel;
+}
+
 async function openComparison(input, output, filename, artifacts = null) {
   closeFaceReview();
   closeComparison();
@@ -162,6 +231,7 @@ async function openComparison(input, output, filename, artifacts = null) {
       if (colorCorrection) addCodecCorrection(existing);
       if (dataPreview) addCodecDataPreview(existing);
       if (decodeError) addCodecError(existing, decodeError);
+      if (fallbackReason) existing.title = T("decoder.fallback").replace("{reason}", fallbackReason);
       return;
     }
     const item = document.createElement("span"), heading = document.createElement("span");
@@ -179,18 +249,24 @@ async function openComparison(input, output, filename, artifacts = null) {
   document.body.style.overflow = "hidden";
   compareClose.focus();
   try {
+    const source=input instanceof Blob?new Uint8Array(await input.arrayBuffer()):input;
+    const dngSource=source&&isDng(source),dng=dngSource?buildDngInspection(source):null;
     const inspect = async (bytes) => {
       if (!bytes) return null;
       const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
       return buildHeicInspection(data, discoverHeic(data), {onProgress, decoder});
     };
-    const [before, after] = await Promise.all([inspect(input), inspect(output)]);
+    const [nativeBefore, after] = await Promise.all([inspect(dngSource?null:source), inspect(output)]);
+    const dngEntries=new Map(dng?INSPECTION_NAMES.map(name=>[name,dngInspectionEntry(dng,name)]):[]);
+    const before=dng?{entries:dngEntries}:nativeBefore;
     if (generation !== comparisonGeneration) return;
-    const compare = inspectionComparator(input ? new Uint8Array(input) : null, output ? new Uint8Array(output) : null);
+    const compare = dng?{explain:(a,b)=>({status:a?.notComparable?'unknown':a?.present?b?.present?'unknown':'removed':b?.present?'added':'missing',differences:[]})}
+      :inspectionComparator(source?new Uint8Array(source):null,output?new Uint8Array(output):null);
     compareGrid.replaceChildren();
     if (codecSources.childElementCount) compareGrid.append(codecSources);
+    if(dng){compareGrid.append(renderDngInspection(dng));if(!output)return;}
     const hint = document.createElement("div"); hint.className = "inspection-comparison-hint";
-    hint.textContent = T("inspect.compareHint"); compareGrid.append(hint);
+    hint.textContent = T(dng?'dnginspect.compareHint':"inspect.compareHint"); compareGrid.append(hint);
     for (const text of [T("inspect.item"), T("inspect.before"), T("inspect.after")]) {
       const head = document.createElement("div"); head.className = "inspection-head";
       head.textContent = text; compareGrid.appendChild(head);
@@ -394,24 +470,34 @@ document.addEventListener("keydown", event => {
 let lang = pickLanguage();
 const T = (key) => t(lang, key);
 
-let profileIndex = null;
+const profileIndex = GENERATED_PROFILE_INDEX;
 const profileCache = new Map();
+onEncoderRelease(() => profileCache.clear());
 
-async function getProfile(name) {
+async function getProfile(name, ui) {
+  ui.set(T(profileCache.has(name) ? "st.reusingProfile" : "st.generatingProfile").replace("{name}", name));
+  await yieldToBrowser();
   if (!profileCache.has(name)) {
-    let res;
-    try {
-      res = await fetch(`profiles/${profileIndex[name].file}`);
-    } catch (error) {
-      throw new Error(`Profile fetch failed: ${name}`, { cause: error });
-    }
-    if (!res.ok) throw new Error(`Profile fetch failed: ${name} (${res.status})`);
-    profileCache.set(name, await loadProfile(new Uint8Array(await res.arrayBuffer())));
+    const promise = generateProfile(name, progress => updateLinearProgress(ui, progress))
+      .catch(error => {profileCache.delete(name); throw error;});
+    profileCache.set(name, promise);
   }
-  return profileCache.get(name);
+  const profile = await profileCache.get(name);
+  ui.progress(null);
+  ui.set(T("st.profilePrepared").replace("{name}", name));
+  return profile;
+}
+
+function showGeneratedProfileNote(ui) {
+  const note = document.createElement("p");
+  note.className = "generated-profile-note";
+  note.dataset.i18n = "profile.experimentalRendering";
+  note.textContent = T(note.dataset.i18n);
+  ui.el.append(note);
 }
 
 const ERROR_KEYS = {
+  dng: 'err.dng', dngCompression: 'err.dngCompression',
   layout: "err.layout",
   hdr: "err.hdr",
   metadata: "err.metadata",
@@ -441,6 +527,7 @@ async function ensureDecode(bytes, onProgress, decoder) {
 
 /** Identify the container from its magic bytes, so a transcoded upload is obvious. */
 function sniff(b) {
+  if (isDng(b)) return 'dng';
   if (b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "jpeg";
   if (b.length > 7 && b[0] === 0x89 && b[1] === 0x50) return "png";
   if (b.length > 11 && String.fromCharCode(...b.subarray(0, 4)) === "RIFF"
@@ -465,6 +552,14 @@ function addCodecError(item, reason) {
   note.dataset.reason = reason;
   note.textContent = T("decoder.failed").replace("{reason}", reason);
   item.append(note);
+}
+
+function addCodecFallback(sources, reason) {
+  if ([...sources.querySelectorAll(".codec-fallback")].some(note => note.dataset.reason === reason)) return;
+  const note = document.createElement("span"); note.className = "codec-fallback";
+  note.dataset.reason = reason;
+  note.textContent = T("decoder.fallback").replace("{reason}", reason);
+  sources.append(note);
 }
 
 function addCodecDataPreview(item) {
@@ -512,8 +607,8 @@ function row(name) {
   };
   return {
     el,
-    set(text, cls) {
-      const now = performance.now(), finished = cls === "ok" || cls === "err";
+    set(text, cls, {terminal = true} = {}) {
+      const now = performance.now(), finished = terminal && (cls === "ok" || cls === "err");
       // Start at queue entry; a correction starts a new run after the prior summary.
       if (runStarted === null || (!finished && runFinished !== null)) {
         runStarted = now;
@@ -579,6 +674,7 @@ function row(name) {
         if (colorCorrection) addCodecCorrection(existing);
         if (dataPreview) addCodecDataPreview(existing);
         if (decodeError) addCodecError(existing, decodeError);
+        if (fallbackReason) addCodecFallback(sources, fallbackReason);
         loadBar.setAttribute("aria-label",currentLabel.textContent);return;
       }
       const item = document.createElement("span"), heading = document.createElement("span");
@@ -590,11 +686,7 @@ function row(name) {
       if (colorCorrection) addCodecCorrection(item);
       if (dataPreview) addCodecDataPreview(item);
       if (decodeError) addCodecError(item, decodeError);
-      if (fallbackReason) {
-        const reason = document.createElement("span"); reason.className = "codec-fallback";
-        reason.textContent = T("decoder.fallback").replace("{reason}", fallbackReason);
-        sources.append(reason);
-      }
+      if (fallbackReason) addCodecFallback(sources, fallbackReason);
       loadBar.setAttribute("aria-label", currentLabel.textContent);
     },
     progress(value) {
@@ -647,9 +739,12 @@ function row(name) {
       caption.dataset.i18n = source ? "thumbnail.source" : "thumbnail.result";
       caption.textContent = T(caption.dataset.i18n);
       figure.append(img, caption); thumbnails.append(figure);
+      // DNG preview comes from the bounded LibRaw path, avoiding a parallel native RAW decode.
+      if (source && (/\.dng$/i.test(filename) || blob.type === 'image/x-adobe-dng')) {img.hidden = true; return;}
       // Keep the real HEIC as the image URL so Safari's native long-press saves the output.
       const url = source ? URL.createObjectURL(blob) : el.querySelector(".act a[download]").href;
       img.addEventListener("error", () => {
+        if (source && figure.querySelector('canvas')) {URL.revokeObjectURL(url); return;}
         img.hidden = true;
         caption.dataset.i18n = source ? "thumbnail.unavailable" : "thumbnail.saveUnavailable";
         caption.textContent = T(caption.dataset.i18n);
@@ -673,9 +768,22 @@ function row(name) {
       }, {once: true});
       img.src = url;
     },
+    sourceImage(image) {
+      const figure = el.querySelector('.source-thumbnail');
+      if (!figure) return;
+      const canvas = document.createElement('canvas'), scale = Math.min(1, 144 / Math.max(image.width, image.height));
+      canvas.width = Math.max(1, Math.round(image.width * scale));
+      canvas.height = Math.max(1, Math.round(image.height * scale));
+      canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+      canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', name);
+      figure.querySelector('img').hidden = true; figure.prepend(canvas);
+      const caption = figure.querySelector('figcaption');
+      caption.dataset.i18n = 'thumbnail.source'; caption.textContent = T('thumbnail.source');
+    },
     compare(input, output, filename, artifacts = null) {
+      el.querySelector('.inspect-compare')?.remove();
       const b = document.createElement("button");
-      b.className = "dl alt";
+      b.className = "dl alt inspect-compare";
       b.type = "button";
       b.textContent = T("btn.inspectCompare");
       b.addEventListener("click", async () => {
@@ -701,6 +809,7 @@ function row(name) {
 
 function updateLinearProgress(ui, progress) {
   if (progress.stage === "codec") { ui.codec(progress); return; }
+  if (updateModelProgress(ui, progress, T)) return;
   ui.progress(null); ui.update(T("st.linear"));
 }
 
@@ -711,8 +820,9 @@ function updateFaceProgress(ui, progress) {
   if (updateModelProgress(ui, progress, T)) return;
   ui.progress(null);
   const keys = {
-    decode: "st.faceDecode", models: "st.faceModels", detect: "st.faceDetect",
+    decode: "st.faceDecode", models: "st.ortModels", detect: "st.faceDetect",
     segment: "st.faceSegment", metadata: "st.faceMetadata",
+    nativeSegment:'st.dngNativeSegment',
   };
   if (progress.stage === "matte") {
     const key = progress.matte === "portraiteffectsmatte" ? "matte.portraitPerson"
@@ -724,9 +834,12 @@ function updateFaceProgress(ui, progress) {
 }
 
 async function handleBrowserReencode(file, ui, bytes, kind, inputDiscovery = null) {
-  ui.set(T(kind === "heic" ? "st.heicReencode" : "st.rasterPreparing"));
-  const profile = await getProfile("48-12");
+  ui.set(T(kind === 'dng' ? 'st.dngPreparing' : kind === "heic" ? "st.heicReencode" : "st.rasterPreparing"));
+  if (kind === 'dng') {releaseHevcEncoder(); await releaseOrtModels();}
+  const profile = kind === 'dng' ? () => getProfile("48-12", ui) : await getProfile("48-12", ui);
   let rasterEncodingStarted = false;
+  let dngDecodingStarted = false;
+  let nativeDngMasksStarted = false;
   let sourceExif = null;
   let sourceDepth = null;
   let sourceSkin = null;
@@ -740,7 +853,19 @@ async function handleBrowserReencode(file, ui, bytes, kind, inputDiscovery = nul
     catch (error) { console.warn("could not preserve source Portrait depth:", error); }
   }
   let { data, faceResult, portraitMatte, rebuild } = await importRaster(file, profile, (progress) => {
-    if (progress.stage === "codec") ui.codec(progress);
+    if (updateModelProgress(ui, progress, T)) return;
+    if (progress.stage === 'dngDecode') {
+      const message = T('st.dngDecode') + (progress.total ? ` ${progress.done}/${progress.total}` : '');
+      if (dngDecodingStarted) ui.update(message);
+      else {ui.set(message); dngDecodingStarted = true;}
+    }
+    else if (progress.stage === 'dngReady') ui.sourceImage(progress.image);
+    else if (progress.stage === 'dngNativeMask') {
+      const message=T('st.dngNativeMask')+` ${progress.done}/${progress.total}`;
+      if(nativeDngMasksStarted)ui.update(message);else{ui.set(message);nativeDngMasksStarted=true;}
+    }
+    else if (progress.stage === 'dngNativeMaskSkipped') {nativeDngMasksStarted=false;ui.set(T('st.dngNativeMaskSkipped').replace('{name}',progress.name).replace('{error}',progress.error));}
+    else if (progress.stage === "codec") ui.codec(progress);
     else if (progress.stage === "analysis") ui.set(T("decoder.analyzing"));
     else if (progress.stage === "analysisUnavailable") ui.set(T("decoder.analysisUnavailable").replace("{reason}", progress.reason));
     else if (progress.stage === "main") {
@@ -752,17 +877,19 @@ async function handleBrowserReencode(file, ui, bytes, kind, inputDiscovery = nul
     else if (progress.stage === "linear") ui.set(T("st.linear"));
     else if (progress.stage === "auxiliary") ui.set(T("st.rasterAuxiliary"));
     else if (progress.stage === "assemble") ui.set(T("st.rasterAssembling"));
-  }, { faces: faces.checked, sourceExif, sourceDepth, sourceSkin,
+  }, { faces: faces.checked, sourceExif, sourceDepth, sourceSkin, dngBytes: kind === 'dng' ? bytes : null,
     heicAnalysis: kind === "heic" ? {bytes, decoder: "auto", sceneStats: quality.checked} : null });
-  const outName = file.name.replace(/\.(heic|heif|png|jpe?g|webp)$/i, "") + "_PhotographicStyle.HEIC";
+  const outName = file.name.replace(/\.(heic|heif|png|jpe?g|webp|dng)$/i, "") + "_PhotographicStyle.HEIC";
   const sep = lang === "zh" ? "、" : ", ";
-  const bits = [T(kind === "heic" ? "st.heicReencoded" : "st.rasterImported"), T("st.texture")];
+  const bits = [T(kind === 'dng' ? 'st.dngImported' : kind === "heic" ? "st.heicReencoded" : "st.rasterImported"),
+    T("st.generatedProfile").replace("{name}", "48-12"), T("st.texture")];
   if (faceResult.state === "generated") bits.push(T("st.faces"));
   else if (faceResult.state === "none") bits.push(T("st.noface"));
-  else if (faceResult.state === "unavailable") bits.push(T("st.facesUnavailable"));
+  else if (faceResult.state === "unavailable") bits.push(T(faceResult.unavailableReason==='memory'?'st.facesMemoryUnavailable':"st.facesUnavailable"));
   ui.set(`${T("st.ready")} — ${bits.join(sep)}`, "ok");
-  presentResult(ui, data, outName, inputDiscovery ? bytes : null, faceResult.debugArtifacts,
+  presentResult(ui, data, outName, kind==='dng'?file:inputDiscovery ? bytes : null, faceResult.debugArtifacts,
     faceCorrection(faceResult, rebuild, data));
+  showGeneratedProfileNote(ui);
   if(['omitted-unavailable','omitted-disabled'].includes(portraitMatte?.mode)){const note=document.createElement('p');note.className='portrait-result-note';note.textContent=T(portraitMatte.mode==='omitted-disabled'?'portrait.disabled':'portrait.omitted');ui.el.append(note);}
 }
 
@@ -772,8 +899,9 @@ async function handleFile(file, ui = row(file.name), preparedBytes = null) {
     ui.set(T("st.reading"));
     const bytes = preparedBytes || new Uint8Array(await file.arrayBuffer());
     const kind = sniff(bytes);
-    if (["png", "jpeg", "webp"].includes(kind)) {
-      await handleBrowserReencode(file, ui, bytes, kind);
+    if(kind==='dng')ui.compare(file,null,file.name);
+    if (["png", "jpeg", "webp", 'dng'].includes(kind)) {
+      await handleBrowserReencode(file, ui, bytes, kind, null);
       return;
     }
     if (kind !== "heic") { ui.set(T("err.notheic"), "err"); return; }
@@ -848,26 +976,31 @@ async function handleFile(file, ui = row(file.name), preparedBytes = null) {
     }
     if (d.stylesItem !== null) {
       // Preserve native style data while adding Texture/Grain.
-      ui.set(T("st.working"));
+      ui.set(T("st.native"));
+      ui.set(T("st.texturePreparing"));
       await yieldToBrowser();
-      rebuild = updated => addTexture(bytes, {
-        matteOverrides: updated.overrides, personMetadata: updated.personMetadata,
-        texturePeopleData: updated.texturePeopleData,
-      }).data;
-      data = rebuild(faceResult);
+      await generateSyntheticHevc(progress => updateLinearProgress(ui, progress));
+      rebuild = async updated => {
+        await generateSyntheticHevc(progress => updateLinearProgress(ui, progress));
+        return addTexture(bytes, {
+          matteOverrides: updated.overrides, personMetadata: updated.personMetadata,
+          texturePeopleData: updated.texturePeopleData,
+        }).data;
+      };
+      data = await rebuild(faceResult);
       bits = [T("st.native"), T("st.texture")];
       if ([...d.infos.keys()].some(id => auxUriForItem(d.props, id) === MATTE_URIS.semantichairmatte))
         bits.push(T("st.hairPreserved"));
       suffix = "_TextureGrain.HEIC";
     } else {
-      // Preserve primary HEVC; encode only an independent 8-bit linear thumbnail.
+      // Preserve primary HEVC; encode only an independent 10-bit linear thumbnail.
       const directHdr = d.hdrGrid !== null && d.hdrTiles.length === 0
         && d.infos.get(d.hdrGrid)?.type === "hvc1";
       const name = genericGraft ? genericProfileName
         : selectProfile(profileIndex, d.primaryTiles.length, d.hdrTiles.length, directHdr);
       ui.set(T("st.preparingStyle"));
       await yieldToBrowser();
-      const profile = await getProfile(name);
+      const profile = await getProfile(name, ui);
       const onDecodeProgress = progress => { if (progress.stage === "codec") ui.codec(progress); };
       const canDecode = quality.checked ? await ensureDecode(bytes, onDecodeProgress, decoder) : false;
       const opts = canDecode
@@ -899,7 +1032,8 @@ async function handleFile(file, ui = row(file.name), preparedBytes = null) {
       // what it reports it actually did, not what we asked for.
       if (report.decodeError) console.warn("decoder unavailable:", report.decodeError);
 
-      bits = [T(report.decoded ? "st.matched" : "st.neutral")];
+      bits = [T("st.generatedProfile").replace("{name}", name),
+        T(report.decoded ? "st.matched" : "st.neutral")];
       if (report.generic) bits.unshift(T("st.genericPreserved"));
       if (report.hdr?.mode === "direct") bits.push(T("st.directHdr"));
       else if (report.hdr?.mode === "tiled-preserved") bits.push(T("st.tiledHdr"));
@@ -924,6 +1058,7 @@ async function handleFile(file, ui = row(file.name), preparedBytes = null) {
     const outputBytes = data instanceof Uint8Array ? data : new Uint8Array(data);
     presentResult(ui, outputBytes, outName, bytes, faceResult.debugArtifacts,
       faceCorrection(faceResult, rebuild, outputBytes));
+    if (d.stylesItem === null) showGeneratedProfileNote(ui);
   } catch (e) {
     console.error("could not port", file.name, e);
     const diagnosed = diagnosePortError(e);
@@ -979,8 +1114,12 @@ async function refreshModelCache() {
     const entries = files.map(file => {
       const item = document.createElement("li"), text = document.createElement("div"),
         name = document.createElement("strong"), size = document.createElement("span"), button = document.createElement("button");
-      const version = T("cache.version").replace("{version}", file.version)
-        + (file.variant ? ` · ${file.variant}` : "");
+      const unknownSource = file.variant === 'onnx' && !file.sourceVersion;
+      const variant = file.sourceVariant || file.variant;
+      const version = (unknownSource
+        ? T("cache.unknownSourceVersion").replace("{revision}", file.version.slice(0, 8))
+        : T("cache.version").replace("{version}", file.sourceVersion || file.version))
+        + (variant ? ` · ${variant}` : "");
       name.textContent = `${T(MODEL_RESOURCE_KEYS[file.resource])} · ${version} · `
         + T(file.current ? "cache.current" : file.version === "latest" ? "cache.unpinned" : "cache.otherVersion");
       size.textContent = file.count ? T("cache.stored").replace("{size}", `${(file.bytes / 1000000).toFixed(1)} MB`) : T("cache.missing");
@@ -1017,13 +1156,5 @@ function clearModelFiles(resource, selection = null) {
 $("model-cache").addEventListener("toggle", () => {if ($("model-cache").open) void refreshModelCache();});
 $("model-cache-clear").addEventListener("click", () => clearModelFiles("all"));
 
-(async () => {
-  applyLanguage(lang);
-  $("version").textContent = VERSION;
-  try {
-    profileIndex = await (await fetch("profiles/index.json")).json();
-  } catch (e) {
-    $("boot").textContent = e.message;
-    $("boot").className = "err";
-  }
-})();
+applyLanguage(lang);
+$("version").textContent = VERSION;

@@ -1,5 +1,5 @@
-import {parseIinf,parseIref,parseIpcoIpma,auxUriForItem,extractItemData,appendIpcoProperty,setItemPropertyAssociations,setItemReference,addItems,removeItems,ispeBox,auxcBox,MATTE_URIS,findItemsByType} from './heif.js?v=0.7.0';
-import {topBox,bytesEqual} from './box.js?v=0.7.0';
+import {parseIinf,parseIref,parseIpcoIpma,auxUriForItem,extractItemData,appendIpcoProperty,setItemPropertyAssociations,setItemReference,addItems,removeItems,ispeBox,auxcBox,MATTE_URIS,findItemsByType} from './heif.js?v=0.8.0';
+import {topBox,bytesEqual} from './box.js?v=0.8.0';
 
 /** Do not pass a donor portrait effect matte off as target-derived data. */
 export function installPortraitMatte(meta,payloads,targetData=null,target=null,generated=null,primary=null) {

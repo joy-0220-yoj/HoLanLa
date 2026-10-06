@@ -1,3 +1,4 @@
+import "./synthetic-fixtures.mjs";
 // Regression test: measuring the photo is an enhancement, never a requirement.
 //
 // A broken or blocked decoder once took the whole port down with it, and because
@@ -6,20 +7,20 @@
 
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { loadProfile } from "../../web/src/zip.js";
+import {generatedProfileFixture} from "./profile-fixtures.mjs";
+import {GENERATED_PROFILE_INDEX} from "../../web/src/generated-profile.js";
 import { patch, selectProfile } from "../../web/src/port.js";
 import { discoverHeic } from "../../web/src/heif.js";
 
 const ROOT = new URL("../../", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 
-const index = JSON.parse(readFileSync(`${ROOT}web/profiles/index.json`, "utf8"));
+const index = GENERATED_PROFILE_INDEX;
 const name = process.argv[2] || "IMG_5049";
 const folder = name.startsWith("IMG_49") ? "noSmartStyle-people" : "noSmartStyle";
 const bytes = new Uint8Array(readFileSync(`${ROOT}${folder}/${name}.HEIC`));
 const d = discoverHeic(bytes);
-const profile = await loadProfile(new Uint8Array(
-  readFileSync(`${ROOT}web/profiles/${index[selectProfile(index, d.primaryTiles.length, d.hdrTiles.length)].file}`)));
+const profile = await generatedProfileFixture(selectProfile(index, d.primaryTiles.length, d.hdrTiles.length));
 
 let pass = 0, fail = 0;
 const check = (label, cond, extra = "") => {

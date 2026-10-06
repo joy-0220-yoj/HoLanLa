@@ -8,7 +8,7 @@
   "scope": "./",
   "display": "standalone",
   "background_color": "#ffffff",
-  "theme_color": "#2f6df6",
+  "theme_color": "#1c438f",
   "categories": [
     "photo",
     "utilities"

@@ -1,30 +1,31 @@
 // The patch pipeline, ported from cmd_patch in photographic_style_port.py.
 //
-// The app supplies an independently encoded 8-bit linear thumbnail. Library callers
+// The app supplies an independently encoded 10-bit linear thumbnail. Library callers
 // may still reuse the source thumbnail. The generic graph path may receive
 // a locally encoded replacement thumbnail/HDR pair from the caller,
 // but this container module itself remains codec-independent. Decoding is only needed
 // for optional target scene statistics and c/d light maps and is supplied as a callback.
 
-import { topBox, boxes, be, concat, slice, u } from "./box.js?v=0.7.0";
+import { topBox, boxes, be, concat, slice, u } from "./box.js?v=0.8.0";
 import {
   discoverHeic, parseIloc, parseIinf, parseIref, parseIpcoIpma, extractItem, extractItemData, replaceIdatItem,
   propertyForItem, propertyBoxBytes, dimensionsForItem, auxUriForItem,
   irotAngleForItem, itemOrientation, displayDimensions, findItemsByType,
-  replaceIpcoProperty, replaceItemPropertyWithSource, appendIpcoProperty,
+  replaceItemPropertyWithSource, appendIpcoProperty,
   repointItemProperty, associateItemProperty, setItemPropertyAssociations, removeItems, setItemReference, addItems,
-  ispeBox, IROT_IDENTITY,
+  ispeBox, IROT_IDENTITY, internIpcoProperty, compactItemProperties,
   MATTE_URIS, MATTE_URI_SET, DEPTH_URI,
-} from "./heif.js?v=0.7.0";
-import { injectAppleMakerNoteTag } from "./exif.js?v=0.7.0";
-import {installPortraitMatte} from './portrait-matte.js?v=0.7.0';
-import { addTextureItems, hasTexture, upgradeStylesV16, preferNativeSkin } from "./texture.js?v=0.7.0";
+} from "./heif.js?v=0.8.0";
+import { ensureAppleStyleExif } from "./exif.js?v=0.8.0";
+import {installPortraitMatte} from './portrait-matte.js?v=0.8.0';
+import {generateSyntheticHevc} from './synthetic-hevc.js?v=0.8.0';
+import { addTextureItems, hasTexture, upgradeStylesV16, preferNativeSkin } from "./texture.js?v=0.8.0";
 import {
   applySceneStatistics, applyLightMaps, setPersonMasksValid, applyPersonMetadata, buildLightMaps,
   linearLumaFromRgb, LIGHTMAP_N,
-} from "./styles.js?v=0.7.0";
+} from "./styles.js?v=0.8.0";
 
-export const VERSION = "0.7.0";
+export const VERSION = "0.8.0";
 
 function gridDescriptor(meta, iid) {
   const iloc = parseIloc(meta, topBox(meta, "meta"));
@@ -80,7 +81,7 @@ function isolateItemProperty(meta, itemIds, type, sourceBox) {
     return property.index;
   });
   let newIndex;
-  [meta, newIndex] = appendIpcoProperty(meta, sourceBox);
+  [meta, newIndex] = internIpcoProperty(meta, sourceBox);
   itemIds.forEach((iid, index) => {
     meta = repointItemProperty(meta, iid, oldIndexes[index], newIndex);
   });
@@ -125,6 +126,7 @@ export function selectProfile(index, primaryTiles, hdrTiles, directHdr = false) 
  * @param opts.texture false to leave out the iOS 27 Texture/Grain set (v0.4.4 output)
  */
 export async function patch(targetData, profile, opts = {}) {
+  if (opts.texture !== false) await generateSyntheticHevc(opts.onProgress);
   const td = discoverHeic(targetData);
   opts = { ...opts, matteOverrides: preferNativeSkin(targetData, td, opts.matteOverrides) };
   const directHdr = td.hdrGrid !== null && td.hdrTiles.length === 0
@@ -266,8 +268,8 @@ export async function patch(targetData, profile, opts = {}) {
     ? extractItem(targetData, targetIloc, td.thumbnail) : opts.syntheticThumbnail.payload);
 
   const targetExif = extractItem(targetData, targetIloc, td.exifItem);
-  payloads.set(Number(manifest.donor_exif_item), injectAppleMakerNoteTag(
-    targetExif, profile.mn54, 0x54, Number(manifest.smartstyle_makernote_type ?? 7)));
+  payloads.set(Number(manifest.donor_exif_item), ensureAppleStyleExif(
+    targetExif, profile.mn54, Number(manifest.smartstyle_makernote_type ?? 7)));
 
   // Compressed payloads must travel with their own codec/colour configuration.
   const donorPrimary0 = Number(manifest.donor_primary_tiles[0]);
@@ -345,9 +347,7 @@ export async function patch(targetData, profile, opts = {}) {
     meta = setItemReference(meta, "dimg", deltaGrid, used);
     meta = replaceGridDescriptor(meta, deltaGrid,
       gridDescriptorV0(dw, dh, columns, rows));
-    const deltaProps = parseIpcoIpma(meta, topBox(meta, "meta"));
-    const deltaIspe = propertyForItem(deltaProps, deltaGrid, "ispe");
-    meta = replaceIpcoProperty(meta, deltaIspe.index, ispeBox(dw, dh), "ispe");
+    meta = replaceItemPropertyWithSource(meta, deltaGrid, 'ispe', ispeBox(dw,dh));
     report.delta = { mode: "neutral-placeholder", width: dw, height: dh, columns, rows, tiles: needed,
       originalRecovered: false };
     if (report.generic) report.generic.delta = report.delta;
@@ -356,6 +356,22 @@ export async function patch(targetData, profile, opts = {}) {
   // tmap declares display geometry and carries its own irot, so it must follow the target.
   const donorTmaps = findItemsByType(parseIinf(meta, topBox(meta, "meta")), "tmap");
   const targetTmaps = findItemsByType(td.infos, "tmap");
+  // Generated profiles contain no donor tone-map parameters. A real source's
+  // gain-map reconstruction metadata must travel with its preserved HDR pixels.
+  if (!donorTmaps.length && targetTmaps.length && td.hdrGrid !== null) {
+    const sourceTmap = targetTmaps.find(id => td.refs.some(ref => ref.type === 'dimg' && ref.from === id
+      && ref.to.length === 2 && ref.to[0] === td.primary && ref.to[1] === td.hdrGrid));
+    if (sourceTmap !== undefined) {
+      const [updated, ids] = addItems(meta, [{key: 'source-tmap', itemType: 'tmap', boxes:
+        ['ispe','pixi','colr','irot','imir'].map(type => propertyBoxBytes(targetData, td.props, sourceTmap, type)).filter(Boolean),
+        refType: 'dimg', refTo: [Number(manifest.donor_primary_item), portHdrItem]}]);
+      meta = updated;
+      const id = ids.get('source-tmap'); donorTmaps.push(id);
+      payloads.set(id, extractItemData(targetData, td, sourceTmap));
+      // The following branch only rewrites idat items; this new item is external.
+      report.tmapMetadata = 'target-preserved';
+    }
+  }
   if (donorTmaps.length) {
     const donorTmap = donorTmaps[0];
     let srcIspe, srcIrot;
@@ -368,7 +384,10 @@ export async function patch(targetData, profile, opts = {}) {
         ref.from === targetTmaps[0] && ref.to.length === 2 &&
         ref.to[0] === td.primary && ref.to[1] === td.hdrGrid);
       if (paired) {
-        meta = replaceIdatItem(meta, donorTmap, extractItemData(targetData, td, targetTmaps[0]));
+        const location = parseIloc(meta, topBox(meta, 'meta')).items.get(donorTmap);
+        if (location.constructionMethod === 1)
+          meta = replaceIdatItem(meta, donorTmap, extractItemData(targetData, td, targetTmaps[0]));
+        else payloads.set(donorTmap, extractItemData(targetData, td, targetTmaps[0]));
         for (const type of ["colr", "pixi"]) {
           const source = propertyBoxBytes(targetData, td.props, targetTmaps[0], type);
           if (source) meta = isolateItemProperty(meta, [donorTmap], type, source);
@@ -421,18 +440,12 @@ export async function patch(targetData, profile, opts = {}) {
       const shared = [...targetSlots.keys()].filter((k) => donorSlots.has(k));
       const extra = [...targetSlots.keys()].filter((k) => !donorSlots.has(k));
       const spare = [...donorSlots.keys()].filter((k) => !targetSlots.has(k));
-      const anyTarget = targetSlots.values().next().value;
-      const [m2, newHvcc] = appendIpcoProperty(meta,
-        propertyBoxBytes(targetData, td.props, anyTarget, "hvcC"));
-      meta = m2;
-      const oldHvcc = propertyForItem(donorProps, donorSlots.get(shared[0]), "hvcC").index;
+      // A source may contain only matte kinds absent from the baseline profile.
       for (const uri of shared) {
-        meta = repointItemProperty(meta, donorSlots.get(uri), oldHvcc, newHvcc);
-        meta = replaceItemPropertyWithSource(meta, donorSlots.get(uri), "auxC",
-          propertyBoxBytes(targetData, td.props, targetSlots.get(uri), "auxC"));
         payloads.set(donorSlots.get(uri),
           extractItem(targetData, targetIloc, targetSlots.get(uri)));
-        meta = copyRenderingProperties(meta,donorSlots.get(uri),targetData,td.props,targetSlots.get(uri),new Set(["irot","imir"]),true);
+        meta = copyRenderingProperties(meta, donorSlots.get(uri), targetData, td.props, targetSlots.get(uri),
+          new Set(['ispe','pixi','hvcC','colr','clli','mdcv','clap','pasp','auxC','irot','imir']));
         report.mattes.transplanted.push(uri.split(":").pop());
       }
       const neutralSrc = donorSlots.get(MATTE_URIS.portraiteffectsmatte);
@@ -480,7 +493,8 @@ export async function patch(targetData, profile, opts = {}) {
       meta = m3; assigned = a;
       for (const [uri, newIid] of assigned) {
         payloads.set(newIid, extractItem(targetData, targetIloc, targetSlots.get(uri)));
-        meta = copyRenderingProperties(meta,newIid,targetData,td.props,targetSlots.get(uri),new Set(["irot","imir"]),true);
+        meta = copyRenderingProperties(meta, newIid, targetData, td.props, targetSlots.get(uri),
+          new Set(['ispe','pixi','hvcC','colr','clli','mdcv','clap','pasp','auxC','irot','imir']));
         report.mattes.added.push(`${uri === DEPTH_URI ? "depth" : uri.split(":").pop()}#${newIid}`);
       }
     }
@@ -561,8 +575,7 @@ export async function patch(targetData, profile, opts = {}) {
     : opts.syntheticThumbnail.hvcc;
   payloads.set(donorLt, td.thumbnail !== null
     ? extractItem(targetData, targetIloc, td.thumbnail) : opts.syntheticThumbnail.payload);
-  meta = replaceIpcoProperty(meta, Number(manifest.linear_thumb_hvcc_property_index),
-    thumbHvcc, "hvcC");
+  meta = replaceItemPropertyWithSource(meta, donorLt, 'hvcC', thumbHvcc);
   meta = replaceItemPropertyWithSource(meta, donorLt, "ispe", td.thumbnail !== null
     ? propertyBoxBytes(targetData, td.props, td.thumbnail, "ispe")
     : ispeBox(opts.syntheticThumbnail.width, opts.syntheticThumbnail.height));
@@ -596,6 +609,7 @@ export async function patch(targetData, profile, opts = {}) {
     report.linearThumb = [lt.width, lt.height];
     report.linearThumbMode = lt.mode;
     report.linearThumbSourcePixels = lt.sourcePixels;
+    report.linearThumbBitDepth = lt.bitDepth;
   } else report.linearThumbMode = "reuse-thumbnail";
 
   // A neutral delta's encoding describes the neutral payload, never the source primary.
@@ -647,7 +661,7 @@ export async function patch(targetData, profile, opts = {}) {
     let blob = payloads.get(donorStyles);
     // Measuring the photo is an enhancement, never a requirement. A decoder that is
     // missing, blocked or simply broken must cost quality, not the whole port - so
-    // failures here fall back to the donor values rather than propagating.
+    // failures here keep the supplied profile defaults rather than propagating.
     // A decoder that returns the wrong number of samples is worse than one that
     // throws: the statistics would come out silently wrong. Check the size.
     const measure = async (req) => {
@@ -704,6 +718,11 @@ export async function patch(targetData, profile, opts = {}) {
     payloads.set(donorStyles, blob);
   }
 
+  // Share equal descriptions only after item-specific edits, then remove obsolete records.
+  const compacted = compactItemProperties(meta);
+  meta = compacted.meta;
+  report.propertyCompaction = {before:compacted.before,after:compacted.after,
+    removedUnused:compacted.removedUnused,mergedDuplicates:compacted.mergedDuplicates};
   // Rebuild one clean mdat and rewrite every external extent.
   const profileIloc = parseIloc(meta, topBox(meta, "meta"));
   const externalIds = [...profileIloc.items.entries()]
@@ -757,6 +776,21 @@ export async function patch(targetData, profile, opts = {}) {
     }
     if (report.tmapMetadata === "target-preserved") verifyItem(targetTmaps[0], findItemsByType(out.infos, "tmap")[0]);
     if(report.portraitMatte.mode==='native-preserved'){types.add('auxC');verifyItem(report.portraitMatte.sourceItemId,report.portraitMatte.itemId);types.delete('auxC');}
+    if (opts.linearThumbnail) {
+      const lt = opts.linearThumbnail, id = out.linearThumb;
+      const dimensions = dimensionsForItem(out.props, id);
+      const orientation = itemOrientation(result, out.props, id);
+      const changed = [];
+      if (dimensions[0] !== lt.width || dimensions[1] !== lt.height) changed.push('dimensions');
+      if (orientation.angle !== targetAngle || orientation.mirror !== targetMirror) changed.push('orientation');
+      if (!equalBytes(extractItemData(result, out, id), lt.payload)) changed.push('payload');
+      for (const [type, value] of [['hvcC', lt.hvcc], ['pixi', lt.pixi], ['colr', lt.colr]])
+        if (!equalBytes(propertyBoxBytes(result, out.props, id, type), value)) changed.push(type);
+      if (changed.length)
+        throw new Error(`self-check failed: independent linear thumbnail ${changed.join(', ')} changed`);
+      report.linearThumbConsistency = { checked: true, width: lt.width, height: lt.height,
+        angle: orientation.angle, mirror: orientation.mirror, codecColorGeometryPreserved: true };
+    }
     if (out.refs.some(ref => !out.infos.has(ref.from) || ref.to.some(id => !out.infos.has(id))))
       throw new Error("self-check failed: dangling image reference");
     if ([...out.props.associations.keys()].some(id => !out.infos.has(id)))

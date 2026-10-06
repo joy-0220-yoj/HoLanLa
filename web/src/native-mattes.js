@@ -2,14 +2,14 @@
 //
 // These are ordinary single-frame HEVC image items.  Decoding their item payloads directly
 // through the selected decoder lets diagnostics show Apple's stored masks without
-// modifying the photo or running MediaPipe again.
+// modifying the photo or running vision inference again.
 
 import { extractItem, auxUriForItem, dimensionsForItem, propertyBoxBytes,
   itemOrientation, storedPointToDisplay,
-  transformNormalizedRect, DEPTH_URI } from "./heif.js?v=0.7.0";
-import { parseBplist } from "./bplist.js?v=0.7.0";
-import { decodeToDisplayCanvas, decodeImageItem } from "./decode.js?v=0.7.0";
-import { MATTE_2026_URIS } from "./texture.js?v=0.7.0";
+  transformNormalizedRect, DEPTH_URI } from "./heif.js?v=0.8.0";
+import { parseBplist } from "./bplist.js?v=0.8.0";
+import { decodeToDisplayCanvas, decodeImageItem } from "./decode.js?v=0.8.0";
+import { MATTE_2026_URIS } from "./texture.js?v=0.8.0";
 
 const URI_TEXTURE_STYLES = "tag:apple.com,2026:photo:metadata:texture_styles";
 
@@ -184,8 +184,8 @@ export function hasNativeFaceMattes(discovery) {
     || items.has("semanticpersonmatte");
 }
 
-export {codecStringFromHvcc, decoderCodecCandidates, displayRotationRadians, readImageGrid} from "./webcodecs-decode.js?v=0.7.0";
-export {decodeImageItem} from "./decode.js?v=0.7.0";
+export {codecStringFromHvcc, decoderCodecCandidates, displayRotationRadians, readImageGrid} from "./webcodecs-decode.js?v=0.8.0";
+export {decodeImageItem} from "./decode.js?v=0.8.0";
 
 function scalar(value) {
   if (typeof value === "number" || typeof value === "string" || typeof value === "boolean")

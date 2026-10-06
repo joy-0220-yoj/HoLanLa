@@ -1,6 +1,7 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
+import "./synthetic-fixtures.mjs";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { loadProfile } from "../../web/src/zip.js";
 import { patch } from "../../web/src/port.js";
 import { inspectionComparator } from "../../web/src/inspection-compare.js";
 import { topBox, boxes } from "../../web/src/box.js";
@@ -31,7 +32,7 @@ if (!available.length && !existsSync(tiledHdrFixture)) {
   process.exit(0);
 }
 
-const profile48 = await loadProfile(new Uint8Array(readFileSync("web/profiles/48-12.zip")));
+const profile48 = await generatedProfileFixture('48-12');
 for (const [path, expectedTiles, expectedDimensions] of available) {
   const source = new Uint8Array(readFileSync(path));
   const before = discoverHeic(source);
@@ -71,7 +72,7 @@ for (const [path, expectedTiles, expectedDimensions] of available) {
 }
 
 if (existsSync(tiledHdrFixture)) {
-  const profile45 = await loadProfile(new Uint8Array(readFileSync("web/profiles/45-15.zip")));
+  const profile45 = await generatedProfileFixture('45-15');
   const source = new Uint8Array(readFileSync(tiledHdrFixture));
   const before = discoverHeic(source);
   const representative = before.primaryTiles[0];

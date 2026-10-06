@@ -1,7 +1,7 @@
 // Retag already-linear raw I420 samples without decoding or changing picture NALs.
 // The browser encoder receives negotiated SDR transport tags because some VideoFrame
 // implementations reject linear transfer. This module only changes SPS VUI.
-import {be, concat} from './box.js?v=0.7.0';
+import {be, concat} from './box.js?v=0.8.0';
 
 function spsBits(nal) {
   if (nal.length < 3 || (nal[0] >> 1 & 63) !== 33) throw Error('Expected HEVC SPS');

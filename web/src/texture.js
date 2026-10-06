@@ -1,20 +1,19 @@
 // iOS 27 Texture/Grain (質感/顆粒). Direct port of add_texture_items / add_texture_bytes in
-// photographic_style_port.py (v0.5.0), with the same Apple bytes from iPhone 18 Pro IMG_0309.
+// Readable plist fields and locally generated empty HEVC masks; no embedded donor blobs.
 //
 // Photos offers the controls only when a style photo carries BOTH the texture_styles item
 // AND iOS 27's twelve 2026 semantic mattes; the item without the mattes removes the whole
 // style palette. For a scene with no people every matte is the same empty 768x576 frame.
 
-import { topBox, metaChildren, findChild, be, concat, box, bytesEqual } from "./box.js?v=0.7.0";
+import { topBox, metaChildren, findChild, be, concat, box, bytesEqual } from "./box.js?v=0.8.0";
 import {
   discoverHeic, parseIloc, parseIinf, parseIpcoIpma, extractItem, propertyForItem,
   auxUriForItem, findItemsByType, appendIpcoProperty, addItems, auxcBox,
-  MATTE_URIS, setItemPropertyAssociations, dimensionsForItem, propertyBoxBytes,
-} from "./heif.js?v=0.7.0";
-import { parseBplist, buildBplist } from "./bplist.js?v=0.7.0";
+  MATTE_URIS, setItemPropertyAssociations, dimensionsForItem, propertyBoxBytes, compactItemProperties,
+} from "./heif.js?v=0.8.0";
+import { parseBplist, buildBplist } from "./bplist.js?v=0.8.0";
+import {getSyntheticTextureMatte} from './synthetic-hevc.js?v=0.8.0';
 
-const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-const hex = (s) => Uint8Array.from(s.match(/../g), (h) => parseInt(h, 16));
 const utf8 = (s) => new TextEncoder().encode(s);
 
 export const URI_TEXTURE_STYLES = "tag:apple.com,2026:photo:metadata:texture_styles";
@@ -23,11 +22,11 @@ export const URI_PERSON_INSTANCES = "tag:apple.com,2026:photo:aux:semanticperson
 // Binary plist: Preset Standard, CaptureType LF, CaptureMode Still, PortType PortTypeBack,
 // HardwareModel iPhone19,7 (matching the native iPhone 18 Pro reference set),
 // TextureStylePeopleDataVersion 3, FilmGrainSeed 92.
-export const TEXTURE_STYLES_BLOB = b64(
-  "YnBsaXN0MDDXAQIDBAUGBwgJCgsMDQ5WUHJlc2V0W0NhcHR1cmVUeXBlW0NhcHR1cmVNb2RlWFBv"
-  + "cnRUeXBlXUhhcmR3YXJlTW9kZWxfEB1UZXh0dXJlU3R5bGVQZW9wbGVEYXRhVmVyc2lvbl1GaWxt"
-  + "R3JhaW5TZWVkWFN0YW5kYXJkUkxGVVN0aWxsXFBvcnRUeXBlQmFja1ppUGhvbmUxOSw3EAMQXAgX"
-  + "Hio2P01te4SHjZqlpwAAAAAAAAEBAAAAAAAAAA8AAAAAAAAAAAAAAAAAAACp");
+export const TEXTURE_STYLES_BLOB = buildBplist(new Map([
+  ['Preset', 'Standard'], ['CaptureType', 'LF'], ['CaptureMode', 'Still'],
+  ['PortType', 'PortTypeBack'], ['HardwareModel', 'iPhone19,7'],
+  ['TextureStylePeopleDataVersion', 3], ['FilmGrainSeed', 92],
+]));
 
 export const MATTE_2026_URIS = [
   "semanticnosematte", "semanticskinmattev2", "semanticnonfaceskinmatte",
@@ -35,16 +34,6 @@ export const MATTE_2026_URIS = [
   "semanticglassesmattev2", "semanticeyebrowsmatte", "semantictattoomatte",
   "semantichandsmatte", "semanticearsmatte", "semanticfaceskinmatte",
 ].map((n) => `tag:apple.com,2026:photo:aux:${n}`);
-const MATTE_ISPE = hex("0000001469737065000000000000030000000240");
-const MATTE_PIXI = hex("0000000e70697869000000000108");
-const MATTE_HVCC = hex(
-  "0000006f68766343010408000000bfc8000000005af000fcfcf8f800000b03a00001001740010c01ffff04"
-  + "0800000300bfc800000300005a170240a100010021420101040800000300bfc800000300005ac018080241"
-  + "6205e49165537020202008a2000100094401c061d2421014c9");
-const MATTE_EMPTY = b64(
-  "AAAAmCgBrxJdSi5rFrhWizr/aWc5IydgU/X8AAADAAADAAADAAADARsKDFgAAAMAAAMAAAMAAAMAAAacAAAD"
-  + "AAADAAADAAADAAADADygAAADAAADAAADAAADAANSAAADAAADAAADAAADAyoAAAMAAAMAAAMAAHTAAAADAAAD"
-  + "AAADAAP8AAADAAADAAADAA6oAAADAAADAAADACgg");
 const MATTE_XMP = utf8(
   '<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 6.0.0">\n'
   + '   <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
@@ -147,7 +136,7 @@ export function preferNativeSkin(data, discovery, generated = new Map()) {
  * Returns [meta, Map(itemId -> payload), summary].
  */
 export function addTextureItems(meta, primary, {
-  matteOverrides = new Map(), texturePeopleData = null,
+  matteOverrides = new Map(), texturePeopleData = null, emptyMatte = null,
 } = {}) {
   const props0 = parseIpcoIpma(meta, topBox(meta, "meta"));
   if (props0.flags & 1) throw new Error("Wide ipma is not supported for adding Texture/Grain items");
@@ -180,6 +169,9 @@ export function addTextureItems(meta, primary, {
   const payloads = new Map();
 
   if (requests.length) {
+    const empty = emptyMatte || getSyntheticTextureMatte();
+    const MATTE_ISPE = box("ispe", concat([be(0, 4), be(empty.width, 4), be(empty.height, 4)]));
+    const MATTE_PIXI = empty.pixi, MATTE_HVCC = empty.hvcc;
     // auxC (descriptive) must precede irot (transformative), so associate in native order.
     let ispeI, pixiI, hvccI;
     [meta, ispeI] = appendIpcoProperty(meta, MATTE_ISPE);
@@ -230,7 +222,7 @@ export function addTextureItems(meta, primary, {
     let mattes, sidecars;
     [meta, mattes] = addItems(meta, specs);
     for (const request of additions)
-      payloads.set(mattes.get(request.key), request.replacement?.payload || MATTE_EMPTY);
+      payloads.set(mattes.get(request.key), request.replacement?.payload || empty.payload);
     [meta, sidecars] = addItems(meta, additions.map((request) => ({
       key: `xmp:${request.key}`, itemType: "mime", contentType: "application/rdf+xml",
       refType: "cdsc", refTo: [mattes.get(request.key)],
@@ -280,7 +272,7 @@ export function addTexture(data, {
     for (const e of it.extents)
       if (e.offset < mo + ms) throw new Error("payload before end of meta");
 
-  const [newMeta, newPayloads, summary] = addTextureItems(
+  let [newMeta, newPayloads, summary] = addTextureItems(
     data.slice(mo, mo + ms), d.primary,
     { matteOverrides: preferNativeSkin(data, d, matteOverrides), texturePeopleData });
   // Preserve every native scene/person statistic, but supply the v16 schema and identity tone
@@ -292,6 +284,8 @@ export function addTexture(data, {
   // Generated face statistics never replace the phone's native 2023 statistics here; they
   // belong in texture_styles; generated skin also updates the legacy skin auxiliary.
   void personMetadata;
+  const compacted = compactItemProperties(newMeta);
+  newMeta = compacted.meta;
   const delta = newMeta.length - ms;
   const metaOut = newMeta.slice();
   const niloc = parseIloc(metaOut, topBox(metaOut, "meta"));
@@ -329,5 +323,7 @@ export function addTexture(data, {
   return { data: result, report: {
     mode: "add-texture", texture: summary, metaGrowth: delta,
     generatedMattes: matteOverrides.size, personMasksValidHint: null, stylesUpgraded,
+    propertyCompaction: {before:compacted.before,after:compacted.after,
+      removedUnused:compacted.removedUnused,mergedDuplicates:compacted.mergedDuplicates},
   } };
 }

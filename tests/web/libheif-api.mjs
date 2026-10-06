@@ -10,21 +10,17 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
+import {LIBHEIF_URL, LIBHEIF_VERSION, LIBHEIF_CACHE} from './libheif-fixture.mjs';
 
 const HERE = new URL(".", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const ROOT = new URL("../../", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 
-// Keep in step with LIBHEIF_URL in web/src/decode.js.
-const decodeSrc = readFileSync(`${ROOT}web/src/decode.js`, "utf8");
-const URL_IN_USE = decodeSrc.match(/const LIBHEIF_URL = "([^"]+)"/)?.[1];
-if (!URL_IN_USE) { console.log("could not find LIBHEIF_URL in web/src/decode.js"); process.exit(1); }
-
 mkdirSync(`${HERE}.cache`, { recursive: true });
-const cached = `${HERE}.cache/${URL_IN_USE.split("/").pop()}`;
+const cached = LIBHEIF_CACHE;
 if (!existsSync(cached)) {
-  console.log(`  fetching ${URL_IN_USE}`);
-  const res = await fetch(URL_IN_USE);
-  if (!res.ok) { console.log(`  could not fetch (${res.status}); skipping`); process.exit(0); }
+  console.log(`  fetching ${LIBHEIF_URL}`);
+  const res = await fetch(LIBHEIF_URL);
+  if (!res.ok) throw Error(`could not fetch pinned libheif bundle (${res.status})`);
   writeFileSync(cached, Buffer.from(await res.arrayBuffer()));
 }
 
@@ -57,6 +53,8 @@ const mod = typeof raw === "function" ? raw() : raw;
 const resolved = mod && typeof mod.then === "function" ? await mod : mod;
 if (resolved?.ready?.then) await resolved.ready;
 check("calling the factory yields HeifDecoder", typeof resolved?.HeifDecoder === "function");
+check("the cached bundle reports the pinned libheif core version",
+  resolved?.heif_get_version?.() === LIBHEIF_VERSION, resolved?.heif_get_version?.());
 
 // Typed arrays must come from the sandbox realm; emscripten uses instanceof.
 const intoSandbox = (buf) => {

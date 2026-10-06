@@ -1,7 +1,8 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
+import "./synthetic-fixtures.mjs";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
 import { topBox, be, box, concat } from "../../web/src/box.js";
-import { loadProfile } from "../../web/src/zip.js";
 import {
   MATTE_URIS, auxUriForItem, discoverHeic, dimensionsForItem, extractItem,
   propertyBoxBytes, parseIinf, parseIpcoIpma, removeItems, irotAngleForItem, imirAxisForItem, parseIloc,
@@ -15,7 +16,7 @@ const metadata = (meta) => ({ infos: parseIinf(meta, topBox(meta, "meta")),
   props: parseIpcoIpma(meta, topBox(meta, "meta")) });
 const profiles = new Map();
 for (const name of ["45-15", "48-12"]) {
-  const profile = await loadProfile(new Uint8Array(readFileSync(`web/profiles/${name}.zip`)));
+  const profile = await generatedProfileFixture(name);
   profiles.set(name, profile);
   const before = metadata(profile.meta);
   const originalSkin = find(before, MATTE_URIS.semanticskinmatte);

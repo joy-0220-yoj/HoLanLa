@@ -1,13 +1,13 @@
 // Shared HEIC analysis/inspection decoder. Only auto mode may fall back to asm.js.
-import {discoverImageItems} from "./heif.js?v=0.7.0";
-import {isolateImageItem} from "./primary-source.js?v=0.7.0";
-import {decodeWebCodecsImageItem, imageRgbColorSpace} from "./webcodecs-decode.js?v=0.7.0";
+import {discoverImageItems} from "./heif.js?v=0.8.0";
+import {isolateImageItem} from "./primary-source.js?v=0.8.0";
+import {decodeWebCodecsImageItem, imageRgbColorSpace} from "./webcodecs-decode.js?v=0.8.0";
 
 export const DECODER_MODES = ["auto", "webcodecs", "libheif"];
 // Production always defaults to automatic fallback. Explicit per-call modes are
 // retained for codec regression tests; old localStorage choices are ignored.
 
-const LIBHEIF_URL = "https://cdn.jsdelivr.net/npm/libheif-js@1.18.2/libheif/libheif.js";
+const LIBHEIF_URL = "https://cdn.jsdelivr.net/npm/libheif-js@1.23.5/libheif/libheif.js";
 
 let libheifPromise = null;
 
@@ -71,8 +71,8 @@ async function decodeAsm(bytes, discovery, iid, {onProgress, maxSide = Infinity,
   try {
     images = decoder.decode(iid === discovery.primary ? bytes : isolateImageItem(bytes, iid, discovery));
     if (!images || !images.length) throw new Error("libheif decoded no image");
-    // 1.18.2's is_primary() wrapper references an undefined global. Use its
-    // exported C API instead, so top-level array order never selects a thumbnail.
+    // Use the exported C API to identify the primary image independently of
+    // wrapper globals and top-level array order (which may start with a thumbnail).
     const isPrimary = item => libheif.heif_image_handle_is_primary_image && item.handle != null
       ? Boolean(libheif.heif_image_handle_is_primary_image(item.handle)) : Boolean(item.is_primary?.());
     const image = images.find(isPrimary) || (images.length === 1 ? images[0] : null);
@@ -144,8 +144,10 @@ async function decodeSelected(bytes, discovery, iid, options) {
     const canvas = await decodeWebCodecsImageItem(bytes, discovery, iid, {...options,onProgress});
     return {canvas, source: "WebCodecs VideoDecoder", colorProfile, colorCorrection};
   } catch (error) {
-    reportFailure("WebCodecs VideoDecoder", error, {colorProfile, colorCorrection});
-    if (decoder === "webcodecs") throw error;
+    if (decoder === "webcodecs") {
+      reportFailure("WebCodecs VideoDecoder", error, {colorProfile, colorCorrection});
+      throw error;
+    }
     try { return await decodeAsm(bytes, discovery, iid, {...options, fallbackReason: error.message || String(error)}); }
     catch (fallbackError) {
       const failure = new Error(`${error.message || error}; libheif fallback failed: ${fallbackError.message || fallbackError}`, {cause: fallbackError});

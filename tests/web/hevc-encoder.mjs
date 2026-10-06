@@ -1,8 +1,7 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
 import {supportedHevcConfig} from '../../web/src/hevc-encoder.js';
 import {prepareHeicAuxiliaries, prepareHeicLinearThumbnail, importRaster} from '../../web/src/raster-import.js';
-import {loadProfile} from '../../web/src/zip.js';
 import {discoverHeic, dimensionsForItem, displayDimensions, itemOrientation} from '../../web/src/heif.js';
 
 const requests = [];
@@ -54,7 +53,7 @@ globalThis.VideoFrame = class {};
 let nativeCalls = 0;
 globalThis.createImageBitmap = async () => {nativeCalls++; throw Error('unexpected photo decode');};
 globalThis.document = {createElement() {throw Error('unexpected canvas or decoder download');}};
-const profile = await loadProfile(new Uint8Array(await readFile('web/profiles/48-12.zip')));
+const profile = await generatedProfileFixture('48-12');
 const data = profile.meta, discovery = discoverHeic(data);
 const file = new File([data], 'source.heic', {type: 'image/heic'});
 accepts = () => false;
@@ -63,7 +62,7 @@ for (const decoder of ['webcodecs', 'libheif']) {
   await assert.rejects(prepareHeicAuxiliaries(file, {...discovery, thumbnail: null},
     e => progress.push(e), {bytes: data, decoder}), /HEVC WebCodecs encoder unavailable/);
   await assert.rejects(prepareHeicLinearThumbnail(file, data, discovery,
-    e => progress.push(e), {decoder}), /8-bit linear thumbnail HEVC encoder unavailable/);
+    e => progress.push(e), {decoder}), /FFmpeg.wasm requires cross-origin isolation/);
   await assert.rejects(importRaster(file, {}, e => progress.push(e),
     {heicAnalysis: {bytes: data, decoder}}), /HEVC WebCodecs encoder unavailable/);
   assert.equal(progress.length, 0, 'unsupported encoder does not attempt source decode');

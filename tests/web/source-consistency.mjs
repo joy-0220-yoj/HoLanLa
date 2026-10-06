@@ -1,10 +1,11 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
+import "./synthetic-fixtures.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { isolatePrimaryImage } from "../../web/src/primary-source.js";
 import { discoverHeic, extractItemData, propertyBoxBytes, appendIpcoProperty, associateItemProperty } from "../../web/src/heif.js";
 import { buildRasterHeic } from "../../web/src/raster-import.js";
 import { rasterColr, rasterVideoColorSpace } from "../../web/src/raster-color.js";
-import { loadProfile } from "../../web/src/zip.js";
 import { patch } from "../../web/src/port.js";
 
 for (const path of ["tests/private-fixtures/native-style.heic", "tests/private-fixtures/grid-42-hdr-15.heic", "tests/private-fixtures/direct-hdr.heic"]) {
@@ -20,7 +21,7 @@ for (const path of ["tests/private-fixtures/native-style.heic", "tests/private-f
   assert.ok(isolated.refs.every(r => r.type === "dimg" && r.from === d.primary));
   console.log(`${path}: primary-only decode preserves pixels and color/orientation; removes HDR/styles/auxiliaries`);
 }
-const profile = await loadProfile(new Uint8Array(readFileSync("web/profiles/48-12.zip")));
+const profile = await generatedProfileFixture('48-12');
 const bytes = new Uint8Array(readFileSync("tests/private-fixtures/direct-hdr.heic")), d = discoverHeic(bytes);
 const { data, report } = await patch(bytes, profile, { texture: false, sceneStats: "donor", lightMaps: "flat" });
 const output = discoverHeic(data);

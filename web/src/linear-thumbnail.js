@@ -1,9 +1,10 @@
-// Independent P3-linear thumbnail encoded with 8-bit WebCodecs.
-import { box, be, concat } from "./box.js?v=0.7.0";
-import {retagLinearHevc, readSpsInfo} from './hevc-linear-tags.js?v=0.7.0';
-import {resolveEncodedColorSpace} from './raster-color.js?v=0.7.0';
-import {blackWhiteI420, measureHevcRange, hevcOutputColor} from './hevc-color.js?v=0.7.0';
-import {supportedHevcConfig} from './hevc-encoder.js?v=0.7.0';
+// Independent P3-linear Main10 thumbnails via FFmpeg.wasm/x265; explicit legacy Main8 via WebCodecs.
+import { box, be, concat } from "./box.js?v=0.8.0";
+import {retagLinearHevc, readSpsInfo} from './hevc-linear-tags.js?v=0.8.0';
+import {resolveEncodedColorSpace} from './raster-color.js?v=0.8.0';
+import {blackWhiteI420, measureHevcRange, hevcOutputColor} from './hevc-color.js?v=0.8.0';
+import {supportedHevcConfig} from './hevc-encoder.js?v=0.8.0';
+import {encodeHevcPixels} from './ffmpeg-hevc.js?v=0.8.0';
 
 export const LINEAR_COLOR = Object.freeze({
   primaries: "smpte432", transfer: "linear", matrix: "bt709", fullRange: false,
@@ -20,7 +21,7 @@ export function p3ToLinearI420(rgba, width, height, floating = false, colorSpace
   return linearSamples(rgba, width, height, floating, colorSpace);
 }
 
-function linearSamples(rgba, width, height, floating, colorSpace = LINEAR_COLOR) {
+function linearSamples(rgba, width, height, floating, colorSpace = LINEAR_COLOR, bitDepth = 8) {
   if (width % 2 || height % 2 || rgba.length !== width * height * 4)
     throw new Error("Invalid linear thumbnail dimensions");
   const plane = width * height, chroma = plane / 4;
@@ -32,14 +33,15 @@ function linearSamples(rgba, width, height, floating, colorSpace = LINEAR_COLOR)
   const chromaScale = colorSpace.fullRange ? 255 : 224;
   const yMax = colorSpace.fullRange ? 1020 : 940, chromaMin = colorSpace.fullRange ? 0 : 64;
   const chromaMax = colorSpace.fullRange ? 1020 : 960;
-  const bytes = new Uint8Array(plane + 2 * chroma);
+  const bytes = bitDepth === 10 ? new Uint16Array(plane + 2 * chroma) : new Uint8Array(plane + 2 * chroma);
   const linear = new Float32Array(plane * 3);
   for (let i = 0; i < plane; i++) for (let c = 0; c < 3; c++) {
     const value = Math.max(0, Math.min(1, rgba[i * 4 + c] / (floating ? 1 : 255)));
     linear[i * 3 + c] = value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
   }
   const write = (index, value, min, max) => {
-    bytes[index] = Math.max(min / 4, Math.min(max / 4, Math.round(value / 4)));
+    const divisor = bitDepth === 10 ? 1 : 4;
+    bytes[index] = Math.max(min / divisor, Math.min(max / divisor, Math.round(value / divisor)));
   };
   for (let y = 0; y < height; y += 2) for (let x = 0; x < width; x += 2) {
     let u = 0, v = 0;
@@ -191,9 +193,29 @@ export async function encodeLinearThumbnail8(image, orientation = {}, onProgress
     sourcePixels: prepared.sourcePixels, bitDepth: 8, transportColor: outputTransport, inputColor: transport, mode: 'webcodecs-main8-p3-linear'};
 }
 
-export async function encodeSelectedLinearThumbnail(image, {bitDepth = 8, ...orientation} = {}, onProgress = () => {}) {
-  if (bitDepth !== 8) throw Error('Only 8-bit linear thumbnail generation is supported');
+export function p3ToLinearI420P10(rgba, width, height, floating = false) {
+  return linearSamples(rgba, width, height, floating, LINEAR_COLOR, 10);
+}
+
+export async function encodeLinearThumbnail10(image, orientation = {}, onProgress) {
+  const prepared = prepareLinearPixels(image, orientation), {width, height} = prepared;
+  const samples = p3ToLinearI420P10(prepared.rgba, width, height, prepared.floating);
+  try {
+    const encoded = await encodeHevcPixels(samples, {width, height,
+      primaries: 'smpte432', transfer: 'linear', matrix: 'bt709'}, onProgress);
+    if (encoded.sps.primaries !== 12 || encoded.sps.transfer !== 8 || encoded.sps.matrix !== 1 || encoded.sps.fullRange)
+      throw Error('10-bit linear thumbnail colour tags disagree');
+    return {payload: encoded.payload, hvcc: encoded.hvcc, width, height,
+      pixi: box('pixi', new Uint8Array([0, 0, 0, 0, 3, 10, 10, 10])),
+      colr: box('colr', concat([new TextEncoder().encode('nclx'), be(12, 2), be(8, 2), be(1, 2), new Uint8Array([0])])),
+      sourcePixels: prepared.sourcePixels, bitDepth: 10, transportColor: LINEAR_COLOR, inputColor: LINEAR_COLOR,
+      mode: 'ffmpeg-wasm-x265-main10-p3-linear'};
+  } catch (error) { throw Error(`10-bit linear thumbnail encode failed: ${error.message}`); }
+}
+
+export async function encodeSelectedLinearThumbnail(image, {bitDepth = 10, ...orientation} = {}, onProgress = () => {}) {
+  if (![8, 10].includes(bitDepth)) throw Error('Unsupported linear thumbnail bit depth');
   onProgress({stage: 'linear', bitDepth});
-  const encoded = await encodeLinearThumbnail8(image, orientation, onProgress);
+  const encoded = await (bitDepth === 10 ? encodeLinearThumbnail10 : encodeLinearThumbnail8)(image, orientation, onProgress);
   return {...encoded, bitDepth};
 }

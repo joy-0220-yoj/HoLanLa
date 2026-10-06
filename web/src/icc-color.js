@@ -4,12 +4,19 @@
 const D50 = [0.9642, 1, 0.8249];
 const BRADFORD_D65_TO_D50 = [1.047886, 0.022919, -0.050216,
   0.029582, 0.990484, -0.017079, -0.009252, 0.015073, 0.751678];
+// Apple's older Display P3 profiles use a slightly different fixed-point
+// adaptation/colorant pair. Match that pair explicitly rather than loosening
+// the tolerance for arbitrary ICC matrices. TRC/header/LUT checks still apply.
+// Display P3 gamut/TRC reference: https://registry.color.org/rgb-registry/displayp3
+const APPLE_P3_ADAPTATION = [68669,1500,-3285,1936,64912,-1117,-605,986,49292].map(v => v / 65536);
 // XYZ columns after Bradford adaptation to the ICC D50 connection space.
 const SPACES = [
   {name: "sRGB", primaries: "bt709", code: 1,
     xyz: [[0.436075,0.222505,0.013932], [0.385065,0.716879,0.097105], [0.143080,0.060617,0.714173]]},
   {name: "Display P3", primaries: "smpte432", code: 12,
     xyz: [[0.515121,0.241196,-0.001053], [0.291977,0.692245,0.041885], [0.157104,0.066574,0.784073]]},
+  {name: "Display P3", primaries: "smpte432", code: 12, adaptation: APPLE_P3_ADAPTATION, tolerance: 2/65536,
+    xyz: [[33756,15805,-69],[19133,45366,2745],[10301,4364,51416]].map(c => c.map(v => v / 65536))},
 ];
 const close = (a, b, tolerance = 0.0002) => a.length === b.length && a.every((v,i) => Math.abs(v-b[i]) <= tolerance);
 const srgbLinear = x => x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
@@ -42,9 +49,12 @@ export function recognizeIccColorSpace(bytes, {allowGrayscale = false} = {}) {
   };
   if (!close(xyz("wtpt"), D50)) reject("unsupported profile white point");
   if (tags.has("bkpt") && !close(xyz("bkpt"),[0,0,0],1/65536)) reject("custom black point");
+  let adaptation;
   if (tags.has("chad")) {
     const tag = tags.get("chad");
-    if (tag.type !== "sf32" || tag.length !== 44 || !close(Array.from({length:9},(_,i)=>fixed(tag.offset+8+i*4)),BRADFORD_D65_TO_D50))
+    if (tag.type !== "sf32" || tag.length !== 44) reject("unsupported chromatic adaptation");
+    adaptation = Array.from({length:9},(_,i)=>fixed(tag.offset+8+i*4));
+    if (!close(adaptation,BRADFORD_D65_TO_D50) && !close(adaptation,APPLE_P3_ADAPTATION,2/65536))
       reject("unsupported chromatic adaptation");
   }
   const curve = name => {
@@ -86,7 +96,8 @@ export function recognizeIccColorSpace(bytes, {allowGrayscale = false} = {}) {
     return {name: "Gray Linear", grayscale: true, transfer: "linear"};
   }
   const columns = ["rXYZ","gXYZ","bXYZ"].map(xyz);
-  const space = SPACES.find(s => s.xyz.every((column,i)=>close(columns[i],column)));
+  const space = SPACES.find(s => s.xyz.every((column,i)=>close(columns[i],column,s.tolerance))
+    && (!adaptation || close(adaptation,s.adaptation || BRADFORD_D65_TO_D50,s.tolerance)));
   if (!space) reject("unsupported RGB primaries");
   const transfers = ["rTRC","gTRC","bTRC"].map(curve);
   if (!transfers.every(t=>t === transfers[0])) reject("different channel tone curves");

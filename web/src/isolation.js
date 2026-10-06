@@ -1,5 +1,5 @@
 // Secure transport is a prerequisite: a service worker cannot repair LAN HTTP.
-export const ISOLATION_BUILD = "0.7.0";
+export const ISOLATION_BUILD = "0.8.0";
 
 export function waitForController(container, scriptURL, timeout = 20_000) {
   return new Promise((resolve, reject) => {

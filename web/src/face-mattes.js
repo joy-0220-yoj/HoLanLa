@@ -1,23 +1,18 @@
 // Experimental browser-only face matte generation.
 //
-// MediaPipe finds faces/landmarks and performs six-class selfie segmentation without
+// ONNX Runtime Web WASM finds faces/landmarks and performs six-class selfie segmentation without
 // uploading the photo. The confidence maps are converted into separate face-skin, all-skin,
 // person, and per-person mattes, rotated back to the HEIC's stored orientation, then encoded
 // as HEVC stills with WebCodecs.
 
-import { concat } from "./box.js?v=0.7.0";
-import { supportedHevcConfig } from "./hevc-encoder.js?v=0.7.0";
-import { decodeToDisplayCanvas } from "./decode.js?v=0.7.0";
+import { concat } from "./box.js?v=0.8.0";
+import { supportedHevcConfig } from "./hevc-encoder.js?v=0.8.0";
+import { decodeToDisplayCanvas } from "./decode.js?v=0.8.0";
 import { displayPointToStored, itemOrientation,
-  transformNormalizedRect, MATTE_URIS } from "./heif.js?v=0.7.0";
-import { MATTE_2026_URIS, URI_PERSON_INSTANCES } from "./texture.js?v=0.7.0";
-import { srgbToLinear, statsBlock } from "./styles.js?v=0.7.0";
-import { downloadModelBytes, withModelTimeout, ModelTimeoutError } from "./model-download.js?v=0.7.0";
-
-const TASKS_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/+esm";
-export const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm";
-export const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-export const SEGMENTER_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/1/selfie_multiclass_256x256.tflite";
+  transformNormalizedRect, MATTE_URIS } from "./heif.js?v=0.8.0";
+import { MATTE_2026_URIS, URI_PERSON_INSTANCES } from "./texture.js?v=0.8.0";
+import { srgbToLinear, statsBlock } from "./styles.js?v=0.8.0";
+import {loadOrtLandmarker, loadOrtSegmenter} from './ort-vision.js?v=0.8.0';
 
 // A promise alone does not let the browser render between synchronous WASM calls.
 const yieldToBrowser = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -157,142 +152,11 @@ export function applePoseFromMatrix(matrix) {
   }));
 }
 
-let tasksPromise = null;
-let visionPromise = null;
-let landmarkerPromise = null;
-let segmenterPromise = null;
-
-// Call only between processing jobs, after deleting the corresponding disk-cache entries.
-export async function releaseFaceModels(resource = "all") {
-  if (resource === "all" || resource === "wasm" || resource === "face") {
-    const instance = await landmarkerPromise?.catch(() => null);
-    instance?.close(); landmarkerPromise = null;
-  }
-  if (resource === "all" || resource === "wasm" || resource === "segmenter") {
-    const result = await segmenterPromise?.catch(() => null);
-    result?.segmenter.close(); segmenterPromise = null;
-  }
-  if (resource === "all" || resource === "wasm") {
-    const fileset = await visionPromise?.catch(() => null);
-    if (fileset?.wasmBinaryPath.startsWith("blob:")) URL.revokeObjectURL(fileset.wasmBinaryPath);
-    visionPromise = null;
-  }
-}
-
 function canvas(width, height) {
   const out = document.createElement("canvas");
   out.width = width;
   out.height = height;
   return out;
-}
-
-async function modelStep(options, resource, phase, operation, timeoutMs = 120000) {
-  await reportProgress(options, "modelLoading", {resource, phase});
-  try {
-    return await withModelTimeout(Promise.resolve().then(operation), timeoutMs, value => value?.close?.());
-  } catch (error) {
-    error.modelResource = resource;
-    error.skipPortraitFallback = resource !== "face" || error instanceof ModelTimeoutError;
-    await reportProgress(options, "modelError", {
-      resource, phase, reason: error instanceof ModelTimeoutError ? "timeout" : "failed",
-      detail: error.message,
-    });
-    throw error;
-  }
-}
-
-async function modelBytes(url, resource, options) {
-  try {
-    return await downloadModelBytes(url, {onProgress: detail =>
-      options.onProgress?.({stage: detail.source === "cache" ? "modelCache"
-        : detail.source === "cacheWarning" ? "modelCacheWarning" : "modelDownload", resource, ...detail})});
-  } catch (error) {
-    error.modelResource = resource;
-    error.skipPortraitFallback = resource !== "face" || error instanceof ModelTimeoutError;
-    await reportProgress(options, "modelError", {
-      resource, phase: "download", reason: error instanceof ModelTimeoutError ? "stalled" : "failed",
-      detail: error.message,
-    });
-    throw error;
-  }
-}
-
-function loadTasks(options = {}) {
-  if (!tasksPromise) tasksPromise = modelStep(options, "runtime", "load", () => import(TASKS_URL), 60000)
-    .catch(error => { tasksPromise = null; throw error; });
-  return tasksPromise;
-}
-
-async function loadVisionFileset(options = {}) {
-  if (!visionPromise) {
-    visionPromise = loadTasks(options).then(async ({ FilesetResolver }) => {
-      const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
-      const bytes = await modelBytes(fileset.wasmBinaryPath, "wasm", options);
-      // Both model instances reuse this page-local URL. It remains valid until the page closes.
-      return {...fileset, wasmBinaryPath: URL.createObjectURL(new Blob([bytes], {type: "application/wasm"}))};
-    }).catch(error => { visionPromise = null; throw error; });
-  }
-  return visionPromise;
-}
-
-async function loadLandmarker(progressOptions = {}) {
-  if (landmarkerPromise) return landmarkerPromise;
-  landmarkerPromise = (async () => {
-    const { FaceLandmarker } = await loadTasks(progressOptions);
-    const vision = await loadVisionFileset(progressOptions);
-    const modelAssetBuffer = await modelBytes(MODEL_URL, "face", progressOptions);
-    const options = {
-      runningMode: "IMAGE", numFaces: 5,
-      minFaceDetectionConfidence: 0.35, minFacePresenceConfidence: 0.4,
-      minTrackingConfidence: 0.4, outputFaceBlendshapes: false,
-      outputFacialTransformationMatrixes: true,
-    };
-    try {
-      return await modelStep(progressOptions, "face", "gpu", () => FaceLandmarker.createFromOptions(vision, {
-        ...options, baseOptions: { modelAssetBuffer, delegate: "GPU" },
-      }));
-    } catch (gpuError) {
-      if (gpuError instanceof ModelTimeoutError) throw gpuError;
-      console.warn("MediaPipe GPU delegate unavailable, using CPU:", gpuError);
-      return modelStep(progressOptions, "face", "cpu", () => FaceLandmarker.createFromOptions(vision, {
-        ...options, baseOptions: { modelAssetBuffer, delegate: "CPU" },
-      }));
-    }
-  })().catch((error) => {
-    landmarkerPromise = null;
-    throw error;
-  });
-  return landmarkerPromise;
-}
-
-function normalizedLabel(value) {
-  return String(value || "").toLowerCase().replace(/[^a-z]/g, "");
-}
-
-async function loadSegmenter(progressOptions = {}) {
-  if (segmenterPromise) return segmenterPromise;
-  segmenterPromise = (async () => {
-    const { ImageSegmenter } = await loadTasks(progressOptions);
-    const vision = await loadVisionFileset(progressOptions);
-    const modelAssetBuffer = await modelBytes(SEGMENTER_MODEL_URL, "segmenter", progressOptions);
-    // Deliberately use CPU. MediaPipe's Web GPU delegate has returned scrambled
-    // SelfieMulticlass categories on iOS Safari; correctness matters more than latency here.
-    const segmenter = await modelStep(progressOptions, "segmenter", "cpu", () => ImageSegmenter.createFromOptions(vision, {
-      baseOptions: { modelAssetBuffer, delegate: "CPU" },
-      runningMode: "IMAGE", outputCategoryMask: false, outputConfidenceMasks: true,
-    }));
-    const labels = segmenter.getLabels().map(normalizedLabel);
-    const required = ["background", "hair", "bodyskin", "faceskin", "clothes", "others"];
-    const indices = Object.fromEntries(required.map((name, fallback) => {
-      const found = labels.indexOf(name);
-      return [name, found >= 0 ? found : fallback];
-    }));
-    return { segmenter, indices };
-  })().catch((error) => {
-    segmenterPromise = null;
-    throw error;
-  });
-  return segmenterPromise;
 }
 
 function path(ctx, landmarks, indices, width, height) {
@@ -632,7 +496,7 @@ function detectionCandidates(result, rect = { x: 0, y: 0, width: 1, height: 1 })
  * enlarged back to the analysis size, and merge their coordinates into the whole image.
  */
 async function detectFacesMultiPass(landmarker, source) {
-  const candidates = detectionCandidates(landmarker.detect(source));
+  const candidates = detectionCandidates(await landmarker.detect(source));
   const windows = [
     { x: 0, y: 0, width: 0.62, height: 0.62 },
     { x: 0.38, y: 0, width: 0.62, height: 0.62 },
@@ -648,14 +512,14 @@ async function detectFacesMultiPass(landmarker, source) {
     crop.getContext("2d").drawImage(source,
       Math.round(source.width * rect.x), Math.round(source.height * rect.y),
       cropWidth, cropHeight, 0, 0, crop.width, crop.height);
-    candidates.push(...detectionCandidates(landmarker.detect(crop), rect));
+    candidates.push(...detectionCandidates(await landmarker.detect(crop), rect));
   }
   return mergeFaceCandidates(candidates, 5);
 }
 
-async function segmentSelfie(source, width, height) {
-  const { segmenter, indices } = await loadSegmenter();
-  const result = segmenter.segment(source);
+async function segmentSelfie(source, width, height, options) {
+  const { segmenter, indices } = await loadOrtSegmenter(options);
+  const result = await segmenter.segment(source);
   const masks = result.confidenceMasks || [];
   if (masks.length < 6) {
     masks.forEach((mask) => mask.close());
@@ -964,10 +828,13 @@ export async function encodeFaceMatte(canvasSource, onProgress) {
  */
 async function generateFaceMattesFromDisplay(display, angle, mirror, options = {}) {
   const {portraitOnly = false} = options;
+  const sourceMasks=options.nativeMasks||new Map(),personUri=MATTE_2026_URIS.find(uri=>uri.endsWith(':semanticpersonmatte'));
+  const nativePerson=sourceMasks.get(MATTE_URIS.portraiteffectsmatte)||sourceMasks.get(personUri);
+  const nativeSkin=sourceMasks.get(MATTE_URIS.semanticskinmatte)||sourceMasks.get(MATTE_2026_URIS[1]);
+  const nativeAccessories=sourceMasks.get(MATTE_URIS.semanticglassesmatte);
   const analysis = analysisCanvas(display);
-  await reportProgress(options, "models");
-  const landmarker = portraitOnly ? null : await loadLandmarker(options);
-  await loadSegmenter(options);
+  if(!portraitOnly||!nativePerson)await reportProgress(options, "models");
+  const landmarker = portraitOnly ? null : await loadOrtLandmarker(options);
   let detections = [];
   if (!portraitOnly) {
     await reportProgress(options, "detect");
@@ -977,9 +844,31 @@ async function generateFaceMattesFromDisplay(display, angle, mirror, options = {
 
   const { width: displayWidth, height: displayHeight } =
     faceMatteDimensions(display.width, display.height);
-  await reportProgress(options, "segment");
-  const segmented = await segmentSelfie(analysis, displayWidth, displayHeight);
+  const scaleMask=source=>{const out=canvas(displayWidth,displayHeight);if(source)out.getContext('2d').drawImage(source,0,0,displayWidth,displayHeight);return out;};
+  const nativeComplete=nativePerson&&(portraitOnly||!faces.length||nativeSkin&&nativeAccessories);
+  let segmented;
+  if(nativeComplete){
+    await reportProgress(options,'nativeSegment');
+    segmented={skin:scaleMask(nativeSkin),faceSkin:scaleMask(null),bodySkin:scaleMask(null),person:scaleMask(nativePerson),accessories:scaleMask(nativeAccessories)};
+  }else{
+    await loadOrtSegmenter(options);
+    await reportProgress(options, "segment");
+    segmented=await segmentSelfie(analysis, displayWidth, displayHeight, options);
+  }
+  if(nativePerson)segmented.person=scaleMask(nativePerson);
+  if(nativeAccessories)segmented.accessories=scaleMask(nativeAccessories);
+  if(nativeSkin){
+    segmented.skin=scaleMask(nativeSkin);
+    segmented.faceSkin=scaleMask(nativeSkin);
+    const face=contourMask(faces,FACE_OVAL,displayWidth,displayHeight,0);
+    const ctx=segmented.faceSkin.getContext('2d');ctx.globalCompositeOperation='destination-in';ctx.drawImage(face,0,0);
+    segmented.bodySkin=scaleMask(nativeSkin);
+    const body=segmented.bodySkin.getContext('2d');body.globalCompositeOperation='destination-out';body.drawImage(face,0,0);
+  }
   const review = {display, angle, mirror, detections, segmented,
+    portraitEncoded:options.nativeEncoded?.get(MATTE_URIS.portraiteffectsmatte),
+    baseEncoded:options.nativeEncoded?.size?new Map([...options.nativeEncoded].filter(([uri])=>MATTE_2026_URIS.includes(uri))
+      .map(([uri,value])=>[uri.split(':').at(-1),value])):undefined,
     items: detections.map((candidate, index) => {
       const r = bounds(candidate.landmarks);
       return {id: index, rect: clippedRect(r.x - r.width * .15, r.y - r.height * .15,
@@ -992,8 +881,8 @@ async function generateFaceMattesFromDisplay(display, angle, mirror, options = {
     review.display = analysis;
     return result;
   }
-  await reportProgress(options, "matte", {matte: "portraiteffectsmatte"});
-  const portraitEncoded=await encodeFaceMatte(matteToStored(opaqueMask(segmented.person),angle,mirror), options.onProgress);
+  if(!review.portraitEncoded)await reportProgress(options, "matte", {matte: "portraiteffectsmatte"});
+  const portraitEncoded=review.portraitEncoded||await encodeFaceMatte(matteToStored(opaqueMask(segmented.person),angle,mirror), options.onProgress);
   const portraitOverride={...portraitEncoded,pixi:FACE_MATTE_PIXI};
   return {state:portraitOnly?'skipped':'none',overrides:new Map([[MATTE_URIS.portraiteffectsmatte,portraitOverride]]),faces:0,portraitGenerated:true};
 }
@@ -1060,7 +949,8 @@ export async function rebuildFaceMattes(review, excludedIds = [], options = {}) 
     const mask = semanticMasks[name] = build();
     encodedByName.set(name, cached || (name === 'semanticpersonmatte' ? portraitEncoded : await encodeMask(mask)));
   }
-  review.baseEncoded ||= new Map(encodedByName);
+  review.baseEncoded ||= new Map();
+  for(const [name,encoded] of encodedByName)if(!review.baseEncoded.has(name))review.baseEncoded.set(name,encoded);
   const encodedPerson = encodedByName.get("semanticpersonmatte");
   const referenceKeys = keptIds.map(i => `FSINCInstanceMask${9 + i}`);
   const instances = [];

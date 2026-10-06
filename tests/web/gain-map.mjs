@@ -1,3 +1,4 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { box, concat, be, topBox } from "../../web/src/box.js";
@@ -130,15 +131,14 @@ const tmapDiscovery = { ...discovery, hdrGrid: null,
   refs: [...discovery.refs, { type: "dimg", from: 6, to: [7, 1] }] };
 assert.equal((await buildHeicInspection(bytes, tmapDiscovery)).entries.get("HDR gain map").present, true);
 // Variable-length replacement must preserve every old idat item and update iloc.
-const { loadProfile } = await import("../../web/src/zip.js");
-const profile = await loadProfile(new Uint8Array(await readFile("web/profiles/45-15.zip")));
+const profile = await generatedProfileFixture('45-15');
 const before = discoverHeic(profile.meta);
-const tmapId = [...before.infos].find(([, info]) => info.type === "tmap")[0];
+const gridId = before.primary;
 const replacement = new Uint8Array(143).fill(37);
-const updatedMeta = replaceIdatItem(profile.meta, tmapId, replacement);
+const updatedMeta = replaceIdatItem(profile.meta, gridId, replacement);
 const after = discoverHeic(updatedMeta);
-assert.deepEqual(extractItemData(updatedMeta, after, tmapId), replacement);
+assert.deepEqual(extractItemData(updatedMeta, after, gridId), replacement);
 for (const [iid, item] of before.iloc.items)
-  if (item.constructionMethod === 1 && iid !== tmapId)
+  if (item.constructionMethod === 1 && iid !== gridId)
     assert.deepEqual(extractItemData(updatedMeta, after, iid), extractItemData(profile.meta, before, iid));
 console.log("HDR gain map descriptors, tile stitching, rotation, previews and decoder errors passed");

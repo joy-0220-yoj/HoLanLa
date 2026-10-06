@@ -1,9 +1,12 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
+import "./synthetic-fixtures.mjs";
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {be, concat} from '../../web/src/box.js';
-import {extractRasterExif, extractAppleMakerNoteTag, getMakerNoteBlob, readExifOrientation} from '../../web/src/exif.js';
+import {extractRasterExif, extractAppleMakerNoteTag, getMakerNoteBlob, readExifOrientation,
+  ensureAppleStyleExif, injectAppleMakerNoteTag} from '../../web/src/exif.js';
+import {patch} from '../../web/src/port.js';
 import {buildRasterExif, buildRasterHeic} from '../../web/src/raster-import.js';
-import {loadProfile} from '../../web/src/zip.js';
 import {discoverHeic, extractItemData, propertyBoxBytes, TIFF_TYPE_SIZES} from '../../web/src/heif.js';
 
 function readExif(payload) {
@@ -55,7 +58,7 @@ const original = readExif(source);
 assert.equal(original.root.get(0x010f).value, 'Example'); assert.equal(original.root.get(0x0110).value, 'Test Camera');
 assert.equal(original.exif.get(0x8827).value, 1600); assert.ok(original.gps.has(2) && original.gps.has(4));
 const originalBytes = source.slice();
-const profile = await loadProfile(new Uint8Array(fs.readFileSync('web/profiles/48-12.zip'))), donor = discoverHeic(profile.meta);
+const profile = await generatedProfileFixture('48-12'), donor = discoverHeic(profile.meta);
 const fixture = cameraFixture(), fixtureOutput = readExif(buildRasterExif(profile.mn54, 7, fixture));
 assert.deepEqual(fixtureOutput.gps, readExif(fixture).gps);
 assert.deepEqual(fixtureOutput.exif.get(0x8827), readExif(fixture).exif.get(0x8827));
@@ -104,4 +107,63 @@ const vendor = apple.slice(), mn = getMakerNoteBlob(vendor); mn.set(ascii('Vendo
 const vendorCopy = vendor.slice(), vendorOutput = buildRasterExif(profile.mn54, 7, vendor);
 assert.deepEqual(vendor, vendorCopy); assert.deepEqual(extractAppleMakerNoteTag(vendorOutput).payload, profile.mn54);
 assert.equal(Buffer.from(vendorOutput).includes(Buffer.from('Vendor123')), true, 'original proprietary bytes remain in the TIFF area');
+
+// HEIC graft keeps source orientation/dimensions and every existing metadata value.
+for (const orientation of [1, 3, 6, 8]) {
+  const fixture = cameraFixture(), before = readExif(fixture);
+  const view = new DataView(fixture.buffer), start = view.getUint32(0) + 4;
+  const root = view.getUint32(start + 4, true);
+  for (let i = 0; i < before.root.size; i++) {
+    const pos = start + root + 2 + i * 12;
+    if (view.getUint16(pos, true) === 0x0112) view.setUint16(pos + 8, orientation, true);
+  }
+  const original = fixture.slice(), sourceInfo = readExif(fixture);
+  const added = ensureAppleStyleExif(fixture, profile.mn54), after = readExif(added);
+  assert.deepEqual(fixture, original);
+  assert.equal(readExifOrientation(added), orientation);
+  for (const [tag, entry] of sourceInfo.root) if (tag !== 0x8769)
+    assert.deepEqual(after.root.get(tag), entry);
+  for (const [tag, entry] of sourceInfo.exif) assert.deepEqual(after.exif.get(tag), entry);
+  assert.deepEqual(after.gps, sourceInfo.gps);
+  assert.equal(after.exif.has(0xa002), false, 'graft must not invent new image dimensions');
+  assert.deepEqual(extractAppleMakerNoteTag(added).payload, profile.mn54);
+}
+const bareAdded = ensureAppleStyleExif(bare, profile.mn54);
+assert.equal(readExifOrientation(bareAdded), null, 'do not add raster Orientation=6 to a HEIC source');
+assert.deepEqual(readExif(bareAdded).root.get(0x010f), readExif(bare).root.get(0x010f));
+assert.deepEqual(ensureAppleStyleExif(apple, profile.mn54), injectAppleMakerNoteTag(apple, profile.mn54),
+  'existing Apple MakerNotes keep the original injection behavior byte-for-byte');
+assert.ok(Buffer.from(ensureAppleStyleExif(vendor, profile.mn54)).includes(Buffer.from('Vendor123')));
+assert.throws(() => ensureAppleStyleExif(source.slice(0, 30), profile.mn54), /Exif/,
+  'malformed Exif must not be silently discarded');
+
+// Preserve an existing TIFF thumbnail chain when adding the missing MakerNote.
+const chained = concat([bare, new Uint8Array(6)]), chainView = new DataView(chained.buffer);
+const chainStart = chainView.getUint32(0) + 4, nextOffset = bare.length - chainStart;
+chainView.setUint32(chainStart + 8 + 2 + 12, nextOffset);
+assert.equal(readExif(ensureAppleStyleExif(chained, profile.mn54)).next, nextOffset);
+
+// Exercise the full graft, with synthetic HEVC samples and no active MakerNote.
+const noMakerHeic = output.slice(), exifBytes = extractItemData(noMakerHeic, d, d.exifItem).slice();
+const exifView = new DataView(exifBytes.buffer), exifStart = exifView.getUint32(0) + 4;
+const exifInfo = readExif(exifBytes), exifOffset = exifInfo.root.get(0x8769).value;
+for (let i = 0; i < exifInfo.exif.size; i++) {
+  const pos = exifStart + exifOffset + 2 + i * 12;
+  if (exifView.getUint16(pos, exifInfo.le) === 0x927c) exifView.setUint16(pos, 0xc7ff, exifInfo.le);
+}
+assert.throws(() => getMakerNoteBlob(exifBytes), /0x927c/);
+const exifItem = d.iloc.items.get(d.exifItem);
+noMakerHeic.set(exifBytes, exifItem.baseOffset + exifItem.extents[0].offset);
+const {data: grafted} = await patch(noMakerHeic, profile, {texture: false, sceneStats: 'donor', lightMaps: 'flat'});
+const graftInfo = discoverHeic(grafted), graftExif = extractItemData(grafted, graftInfo, graftInfo.exifItem);
+assert.deepEqual(extractAppleMakerNoteTag(graftExif).payload, profile.mn54);
+assert.equal(readExifOrientation(graftExif), readExifOrientation(exifBytes));
+assert.deepEqual(readExif(graftExif).gps, original.gps);
+const sourceEntries = readExif(exifBytes), graftEntries = readExif(graftExif);
+for (const [tag, entry] of sourceEntries.root) if (tag !== 0x8769)
+  assert.deepEqual(graftEntries.root.get(tag), entry);
+for (const [tag, entry] of sourceEntries.exif) assert.deepEqual(graftEntries.exif.get(tag), entry);
+for (let i = 0; i < d.primaryTiles.length; i++) assert.deepEqual(
+  extractItemData(grafted, graftInfo, graftInfo.primaryTiles[i]), extractItemData(noMakerHeic, d, d.primaryTiles[i]));
+console.log('HEIC MakerNote fallback: source Exif, orientations, thumbnail chain and original HEVC tiles preserved; native Apple and malformed metadata regressions passed');
 console.log('Synthetic camera fixture: exact camera/exposure/date/GPS preservation in HEIC; JPEG/PNG/WebP EXIF, both byte orders, MakerNotes, orientation and malformed metadata passed');

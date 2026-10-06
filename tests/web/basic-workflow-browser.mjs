@@ -1,3 +1,6 @@
+import {routeOrtStub} from './ort-browser-stub.mjs';
+import {routeBrowserEncoder} from "./browser-encoder-fixtures.mjs";
+import "./synthetic-fixtures.mjs";
 // Optional browser regression: basic processing must not depend on advanced controls.
 // PLAYWRIGHT_MODULE and PLAYWRIGHT_EXECUTABLE may point at an existing runtime.
 import assert from "node:assert/strict";
@@ -18,7 +21,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(404); res.end(); return;
   }
   const mime = {".js": "text/javascript", ".html": "text/html", ".json": "application/json", ".webmanifest": "application/manifest+json"};
-  res.writeHead(200, {"Content-Type": mime[path.extname(filename)] || "application/octet-stream", "Cache-Control": "no-store"});
+  res.writeHead(200, {"Cross-Origin-Opener-Policy":"same-origin","Cross-Origin-Embedder-Policy":"require-corp","Content-Type": mime[path.extname(filename)] || "application/octet-stream", "Cache-Control": "no-store"});
   res.end(fs.readFileSync(filename));
 });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -34,34 +37,12 @@ try {
   await context.route("**/*", route => {
     const url = route.request().url();
     if (url.startsWith(origin)) return route.continue();
-    if (url.includes("@mediapipe/tasks-vision@") && url.endsWith("/+esm"))
-      return route.fulfill({contentType: "text/javascript", body: `
-        export const FilesetResolver = {forVisionTasks: async base => ({wasmBinaryPath: base + '/vision_wasm_internal.wasm'})};
-        export const FaceLandmarker = {createFromOptions: async () => {
-          let calls = 0;
-          return {detect: () => {
-            globalThis.testFaceDetectCalls = (globalThis.testFaceDetectCalls || 0) + 1;
-            return {faceLandmarks: calls++ % 5 ? [] : Array.from({length: globalThis.testFaceCount || 1}, (_, face) =>
-              Array.from({length: 478}, (_, i) => ({x: (globalThis.testFaceCount === 2 ? .3 + face * .4 : .5)
-                + .1 * Math.cos(i), y: .5 + .15 * Math.sin(i), z: 0})))};
-          }};
-        }};
-        export const ImageSegmenter = {createFromOptions: async () => ({
-          getLabels: () => ['background', 'hair', 'body-skin', 'face-skin', 'clothes', 'others'],
-          segment: () => {
-            globalThis.testSegmentationCalls = (globalThis.testSegmentationCalls || 0) + 1;
-            return {confidenceMasks: [.1, .1, .2, .4, .1, .1].map(value => ({width: 4, height: 4,
-              getAsFloat32Array: () => new Float32Array(16).fill(value), close() {}}))};
-          }
-        })};
-      `});
-    if (url.endsWith("/vision_wasm_internal.wasm") || url.endsWith("/face_landmarker.task")
-      || url.endsWith("/selfie_multiclass_256x256.tflite"))
-      return route.fulfill({contentType: "application/octet-stream", body: Buffer.from([1, 2, 3, 4])});
     if (/libheif-js@1\.18\.2\/libheif\/libheif\.js$/.test(url) && fs.existsSync(decoder))
       return route.fulfill({contentType: "text/javascript", body: fs.readFileSync(decoder)});
     return route.abort();
   });
+  await routeOrtStub(context, origin);
+  await routeBrowserEncoder(context);
   const page = await context.newPage(), errors = [], requests = [];
   page.setDefaultTimeout(20000);
   page.on("pageerror", e => errors.push(e.message));

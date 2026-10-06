@@ -1,4 +1,4 @@
-// Read model assets ourselves so MediaPipe cannot hide download progress inside initialization.
+// Read assets separately from initialization to report download progress and retain complete files.
 // Keep this asset cache independent of app releases; sw.js uses the same name for runtime scripts.
 export const MODEL_CACHE_NAME = "holanla-vision-assets-v1";
 export class ModelTimeoutError extends Error {

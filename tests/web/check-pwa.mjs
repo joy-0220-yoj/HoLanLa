@@ -13,6 +13,10 @@ const app = readFileSync(join(WEB, "app.js"), "utf8");
 const worker = readFileSync(join(WEB, "sw.js"), "utf8");
 const errors = [];
 
+if (existsSync(join(WEB, "profiles"))) {
+  errors.push("obsolete web/profiles must not be distributed; profiles are generated in the browser");
+}
+
 try {
   new Function(worker);
 } catch (error) {
@@ -89,7 +93,10 @@ if (!shellMatch) {
       errors.push(`offline asset is not subpath-safe: ${relative}`);
       continue;
     }
-    const path = join(WEB, relative.slice(2));
+    const url = new URL(relative, 'https://pwa-check.test/');
+    if (url.pathname.endsWith('.js') && url.search !== `?v=${buildTag}`)
+      errors.push(`precached script does not use build tag ${buildTag}: ${relative}`);
+    const path = join(WEB, url.pathname.slice(1));
     if (!existsSync(path)) errors.push(`offline asset does not exist: ${relative}`);
   }
 
@@ -104,7 +111,8 @@ if (!shellMatch) {
     walk(WEB)
       .filter((path) => /\.(?:html|js|json|png|webmanifest|zip)$/.test(path))
       .filter((path) => normalize(path) !== normalize(join(WEB, "sw.js")))
-      .map((path) => `./${normalize(path).slice(normalize(WEB).length + 1).replaceAll("\\", "/")}`)
+      .map((path) => `./${normalize(path).slice(normalize(WEB).length + 1).replaceAll("\\", "/")}`
+        + (path.endsWith('.js') ? `?v=${buildTag}` : ''))
   );
   for (const asset of shouldCache) {
     if (!shell.includes(asset)) errors.push(`runtime asset is not precached: ${asset}`);

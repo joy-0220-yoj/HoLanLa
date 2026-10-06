@@ -1,4 +1,4 @@
-import {hevcSpsColor} from "./hevc-color.js?v=0.7.0";
+import {hevcSpsColor} from "./hevc-color.js?v=0.8.0";
 
 /** Some browsers ignore partial decoder colorSpace dictionaries. Fill missing
  * fields from SPS VUI where available; never invent YUV matrix/range from ICC. */

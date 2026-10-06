@@ -29,6 +29,22 @@ test("ICC custom matrices, gamma, channel curves and LUTs cannot masquerade as s
   const curve=iccFixture({sampled:true}),cv=new DataView(curve.buffer);cv.setUint16(tagOffset(curve,"rTRC")+12+512*2,40000);
   assert.throws(()=>recognizeIccColorSpace(curve),/nonmonotonic|tone curve/);
 });
+test("older Apple Display P3 adaptation/colorants are recognized as a pair without accepting custom profiles",()=>{
+  for (const linear of [false,true]) for (const sampled of [false,true])
+    assert.equal(recognizeIccColorSpace(iccFixture({space:'p3',appleP3:true,linear,sampled})).name,
+      linear ? 'Display P3 Linear' : 'Display P3');
+  const apple = iccFixture({space:'p3',appleP3:true}), canonical = iccFixture({space:'p3'});
+  const mixed = apple.slice();
+  mixed.set(canonical.slice(tagOffset(canonical,'chad')+8,tagOffset(canonical,'chad')+44),tagOffset(mixed,'chad')+8);
+  assert.throws(()=>recognizeIccColorSpace(mixed),/RGB primaries/,'adaptation and colorants must match together');
+  for (const name of ['rXYZ','gXYZ','bXYZ','chad']) {
+    const altered = apple.slice(), view = new DataView(altered.buffer), p = tagOffset(altered,name)+8;
+    view.setInt32(p,view.getInt32(p)+128);
+    assert.throws(()=>recognizeIccColorSpace(altered),/RGB primaries|chromatic adaptation/);
+  }
+  for (const options of [{gamma:2.2},{lut:true}])
+    assert.throws(()=>recognizeIccColorSpace(iccFixture({space:'p3',appleP3:true,...options})),/tone curve|custom color transform/);
+});
 test("ICC malformed tables, overlapping tags and truncated curves fail safely",()=>{
   const original=iccFixture();
   for(const change of [

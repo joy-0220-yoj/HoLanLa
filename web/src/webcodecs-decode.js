@@ -1,8 +1,8 @@
 // Decode HEVC image items without loading a software decoder.
-import {extractItemData, dimensionsForItem, propertyBoxBytes, itemOrientation, auxUriForItem} from "./heif.js?v=0.7.0";
-import {metaChildren, findChild, concat, u} from "./box.js?v=0.7.0";
-import {recognizeIccColorSpace} from "./icc-color.js?v=0.7.0";
-import {completeDecoderColorSpace,applyDecodedColorSpace,readGrayscaleData} from "./webcodecs-color.js?v=0.7.0";
+import {extractItemData, dimensionsForItem, propertyBoxBytes, itemOrientation, auxUriForItem} from "./heif.js?v=0.8.0";
+import {metaChildren, findChild, concat, u} from "./box.js?v=0.8.0";
+import {recognizeIccColorSpace} from "./icc-color.js?v=0.8.0";
+import {completeDecoderColorSpace,applyDecodedColorSpace,readGrayscaleData} from "./webcodecs-color.js?v=0.8.0";
 function canvas(width, height) {
   const out = document.createElement("canvas"); out.width = width; out.height = height; return out;
 }

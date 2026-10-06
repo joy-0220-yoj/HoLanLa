@@ -37,23 +37,24 @@ jobs:
           node-version: "22"
 
       # The site is static: no build step, nothing to install. Guard instead
-      # against publishing a personal photo, omitting a donor profile, or
+      # against publishing a personal photo or bundled donor archive, or
       # shipping stale PWA metadata/offline asset paths.
       # The parentheses matter: without them -print binds to the last -iname only.
       - name: Check the site contains no photos
         run: |
-          found=$(find web \( -iname '*.heic' -o -iname '*.heif' \) -print)
+          found=$(find web \( -iname '*.heic' -o -iname '*.heif' -o -iname '*.dng' \) -print)
           if [ -n "$found" ]; then
             echo "::error::web/ contains photo files; they must not be published"
             echo "$found"
             exit 1
           fi
 
-      - name: Check the donor profiles are present
+      - name: Check generated profiles replace bundled donor assets
         run: |
-          for f in web/profiles/index.json web/profiles/48-12.zip web/profiles/45-15.zip; do
+          for f in web/src/generated-profile.js web/src/synthetic-hevc.js web/src/ffmpeg-hevc.js web/src/ffmpeg-worker.js web/src/ffmpeg-assets.js; do
             test -s "$f" || { echo "::error::missing $f"; exit 1; }
           done
+          test ! -e web/profiles || { echo "::error::obsolete web/profiles must not be published"; exit 1; }
 
       - name: Check web regressions, PWA metadata, and translations
         run: npm test

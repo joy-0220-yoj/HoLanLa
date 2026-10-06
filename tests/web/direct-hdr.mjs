@@ -1,6 +1,7 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
+import "./synthetic-fixtures.mjs";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { loadProfile } from "../../web/src/zip.js";
 import { patch } from "../../web/src/port.js";
 import {
   discoverHeic, auxUriForItem, extractItem, propertyBoxBytes, findItemsByType,
@@ -13,7 +14,7 @@ if (!existsSync(fixture)) {
 }
 
 const source = new Uint8Array(readFileSync(fixture));
-const profile = await loadProfile(new Uint8Array(readFileSync("web/profiles/48-12.zip")));
+const profile = await generatedProfileFixture('48-12');
 const before = discoverHeic(source);
 const { data, report } = await patch(source, profile, {
   texture: false, sceneStats: "donor", lightMaps: "flat",

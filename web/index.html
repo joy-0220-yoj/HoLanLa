@@ -3,20 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HoLanLa</title>
-<meta name="description" content="Adds the iPhone 16-generation Photographic Styles palette to HEIC photos from iPhones before the iPhone 16, plus the iOS 27 Texture and Grain controls. Runs entirely in your browser — photos are never uploaded.">
+<title>唬爛啦 HoLanLa｜攝影風格調色盤移植工具</title>
+<meta name="description" content="Adds the iPhone 16-generation Photographic Styles palette to HEIC photos from iPhones before the iPhone 16, plus the iOS 27 Texture and Grain controls. Photo analysis, inference and conversion run exclusively on your device. Photos are never uploaded, and no usage statistics (telemetry) are collected or transmitted.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="HoLanLa">
-<meta property="og:title" content="HoLanLa">
-<meta property="og:description" content="Adds iPhone 16-generation Photographic Styles and iOS 27 Texture/Grain to HEIC photos from older iPhones, entirely in your browser.">
+<meta property="og:title" content="唬爛啦 HoLanLa｜攝影風格調色盤移植工具">
+<meta property="og:description" content="為照片加入新一代攝影風格調色盤，支援 HEIC、PNG、JPEG、WebP、DNG (ProRAW)，在瀏覽器內完成處理。照片不上傳，不收集或傳送使用統計。">
 <meta property="og:type" content="website">
+<meta property="og:url" content="https://joy-0220-yoj.github.io/HoLanLa/">
+<meta property="og:site_name" content="唬爛啦 HoLanLa">
+<meta property="og:locale" content="zh_TW">
+<meta property="og:image" content="https://joy-0220-yoj.github.io/HoLanLa/social-preview.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="唬爛啦 HoLanLa 攝影風格調色盤移植工具，搭配色彩調整示意圖與本機處理、照片不上傳的說明。">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='white' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='white'/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="icons/icon.svg">
+<link rel="alternate icon" type="image/png" href="icons/icon-192.png">
 <style>
   :root {
     --bg: #ffffff; --fg: #16181d; --muted: #5b6270; --line: #e3e6ec;
@@ -158,6 +167,7 @@
   .thumbnail figcaption { margin-top: .3rem; color: var(--muted); font-size: .78rem; overflow-wrap: anywhere; }
   .face-summary { grid-column: 1 / -1; grid-row: 3; margin: .25rem 0 0; color: var(--muted); font-size: .85rem; }
   .portrait-result-note { grid-column: 1 / -1; grid-row: 7; min-width: 0; color: var(--muted); font-size: .85rem; }
+  .generated-profile-note { grid-column: 1 / -1; grid-row: 8; min-width: 0; color: var(--muted); font-size: .85rem; }
   .model-cache { margin-top: 1rem; border: 1px solid var(--line); border-radius: 9px; padding: .7rem .9rem; }
   .model-cache summary { cursor: pointer; font-weight: 600; }
   .model-cache p { color: var(--muted); font-size: .85rem; }
@@ -222,6 +232,13 @@
   .inspection-cell img { display: block; width: 100%; height: auto; margin: .35rem 0;
                          background: #000; border-radius: 5px; }
   .inspection-cell small { display: block; }
+  .dng-inspection { overflow-wrap: anywhere; }
+  .dng-layer { margin: .7rem 0; }
+  .dng-layer summary { cursor: pointer; }
+  .dng-layer img, .dng-layer canvas { display: block; max-width: 100%; max-height: 55dvh; margin: .6rem 0; object-fit: contain; }
+  .dng-layer pre { overflow: auto; max-height: 22rem; font-size: .75rem; }
+  .dng-layer .dng-gain-map { width: 20rem; image-rendering: pixelated; }
+  .dng-layer label { display: block; }
   .inspection-comparison-hint { grid-column: 1 / -1; background: var(--bg); padding: .7rem; font-size: .8rem; color: var(--muted); }
   .inspection-match { display: block; margin-top: .5rem; font-family: system-ui, sans-serif; font-weight: 600; }
   .inspection-match.same { color: var(--ok); }
@@ -263,7 +280,7 @@
     <span data-i18n="drop.small"></span>
   </div>
   <input type="file" id="file" multiple
-         accept="image/heic,image/heif,image/png,image/jpeg,image/webp,.heic,.heif,.png,.jpg,.jpeg,.webp">
+         accept="image/heic,image/heif,image/png,image/jpeg,image/webp,image/x-adobe-dng,.dng,.heic,.heif,.png,.jpg,.jpeg,.webp">
 
   <div class="opts">
     <input type="checkbox" id="quality" checked>
@@ -305,6 +322,7 @@
     <h2 data-i18n="h.rejected"></h2>
     <p data-i18n="p.rejected"></p>
 
+    <p data-i18n="p.dng"></p>
     <h2 data-i18n="h.knowing"></h2>
     <p data-i18n="p.knowing"></p>
 
@@ -351,6 +369,6 @@
     </div>
   </div>
 </div>
-<script type="module" src="app.js?v=0.7.0"></script>
+<script type="module" src="app.js?v=0.8.0"></script>
 </body>
 </html>

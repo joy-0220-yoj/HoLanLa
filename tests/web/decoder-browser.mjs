@@ -10,11 +10,12 @@ import {deflateSync} from "node:zlib";
 import {box,concat,be,boxes,topBox,findChild,u} from "../../web/src/box.js";
 import {appendIpcoProperty,associateItemProperty,replaceIpcoProperty} from "../../web/src/heif.js";
 import {iccFixture} from "./icc-fixture.mjs";
+import {LIBHEIF_URL, LIBHEIF_VERSION, LIBHEIF_CACHE} from './libheif-fixture.mjs';
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const root=fileURLToPath(new URL("../../web/",import.meta.url));
 const dir=path.resolve("tests/web/.cache/decoder-browser");fs.mkdirSync(dir,{recursive:true});
-const library=path.resolve("tests/web/.cache/libheif.js");
-assert.ok(fs.existsSync(library),"Pinned libheif.js must be available in the test cache");
+const library=LIBHEIF_CACHE;
+assert.ok(fs.existsSync(library),`Pinned libheif ${LIBHEIF_VERSION} must be available; run tests/web/libheif-api.mjs first`);
 const ascii=text=>new TextEncoder().encode(text);
 const full=(type,body,version=0)=>box(type,concat([new Uint8Array([version,0,0,0]),body]));
 function sample(level, matrix = 1, raw = null) {
@@ -162,18 +163,18 @@ try {
     await context.route("**/*",route=>{
       const url=route.request().url();
       if(url.startsWith(origin))return route.continue();
-      if(url.includes("libheif-js@1.18.2/libheif/libheif.js")){hits.asm++;return route.fulfill({contentType:"text/javascript",body:fs.readFileSync(library)});}
+      if(url===LIBHEIF_URL){hits.asm++;return route.fulfill({contentType:"text/javascript",body:fs.readFileSync(library)});}
       return route.abort();
     });
     const page=await context.newPage();await page.goto(origin);return {context,page,hits};
   }
   const real=await context();
-  await real.page.selectOption("#decoder","libheif");await real.page.reload();
-  assert.equal(await real.page.locator("#decoder").inputValue(),"libheif","choice survives reload");
+  await real.page.evaluate(()=>localStorage.setItem("holanla.decoder","libheif"));await real.page.reload();
+  assert.equal(await real.page.locator("#decoder").count(),0,"legacy saved choices cannot restore the removed decoder selector");
   const actual=await real.page.evaluate(async()=>{
     const data=new Uint8Array(await (await fetch("/sample.heic")).arrayBuffer());
-    const {decodeToDisplayCanvas,decodeImageItem,decodeToRgb}=await import("./src/decode.js?v=0.7.0");
-    const {discoverImageItems}=await import("./src/heif.js?v=0.7.0");
+    const {decodeToDisplayCanvas,decodeImageItem,decodeToRgb,loadLibheif}=await import("./src/decode.js?v=0.7.1");
+    const {discoverImageItems}=await import("./src/heif.js?v=0.7.1");
     const events=[],onProgress=event=>events.push(event);
     const main=await decodeToDisplayCanvas(data,{decoder:"libheif",onProgress});
     const corners=[[8,8],[56,8],[8,56],[56,56]].map(([x,y])=>main.getContext("2d").getImageData(x,y,1,1).data[0]);
@@ -192,9 +193,10 @@ try {
       const web=await decodeToDisplayCanvas(data,{decoder:"webcodecs",onProgress});
       native={supported:true,corners:[[8,8],[56,8],[8,56],[56,56]].map(([x,y])=>web.getContext("2d").getImageData(x,y,1,1).data[0])};
     } catch(error){native={supported:false,error:error.message};}
-    return {dimensions:[main.width,main.height],corners,auxDimensions:[aux.width,aux.height],auxiliary,rgbLength:rgb.length,events,native,variants};
+    return {libheifVersion:(await loadLibheif()).heif_get_version(),dimensions:[main.width,main.height],corners,auxDimensions:[aux.width,aux.height],auxiliary,rgbLength:rgb.length,events,native,variants};
   });
   const expected=[samples[0],samples[2],samples[1],samples[3]].map(s=>s.expected);
+  assert.equal(actual.libheifVersion,LIBHEIF_VERSION,'Browser must execute the pinned core rather than a stale decoder fixture');
   assert.deepEqual(actual.dimensions,[64,64]);assert.deepEqual(actual.auxDimensions,[32,32]);
   for(let i=0;i<4;i++)assert.ok(Math.abs(actual.corners[i]-expected[i])<=3,`oriented grid corner ${i}: ${actual.corners[i]} vs ${expected[i]}`);
   for (const [variant, order] of [[actual.variants[0],[2,0,3,1]],[actual.variants[1],[2,3,0,1]]])
@@ -204,11 +206,11 @@ try {
   if(actual.native.supported)for(let i=0;i<4;i++)assert.ok(Math.abs(actual.native.corners[i]-actual.corners[i])<=3);
 
   const transformOrder=await real.page.evaluate(async()=>{
-    const {decodeImageItem,decodeToRgb}=await import("./src/decode.js?v=0.7.0");
-    const {discoverImageItems,setItemPropertyAssociations,itemOrientation,storedPointToDisplay,displayPointToStored}=await import("./src/heif.js?v=0.7.0");
-    const {metaChildren,findChild}=await import("./src/box.js?v=0.7.0");
-    const {matteToStored,peopleEntry}=await import("./src/face-mattes.js?v=0.7.0");
-    const {prepareLinearPixels}=await import("./src/linear-thumbnail.js?v=0.7.0");
+    const {decodeImageItem,decodeToRgb}=await import("./src/decode.js?v=0.7.1");
+    const {discoverImageItems,setItemPropertyAssociations,itemOrientation,storedPointToDisplay,displayPointToStored}=await import("./src/heif.js?v=0.7.1");
+    const {metaChildren,findChild}=await import("./src/box.js?v=0.7.1");
+    const {matteToStored,peopleEntry}=await import("./src/face-mattes.js?v=0.7.1");
+    const {prepareLinearPixels}=await import("./src/linear-thumbnail.js?v=0.7.1");
     const NativeDecoder=globalThis.VideoDecoder;let count=0,direct=false;
     globalThis.VideoDecoder=class {
       static async isConfigSupported(config){return {supported:true,config};}
@@ -292,10 +294,10 @@ try {
   // routes reject an unavailable encoder before attempting that expensive decode.
   const sourceBrowser=await context();
   const sourceFallback=await sourceBrowser.page.evaluate(async()=>{
-    const {openHeicSource,prepareHeicAuxiliaries,prepareHeicLinearThumbnail,importRaster}=await import("./src/raster-import.js?v=0.7.0");
-    const {discoverHeic,discoverImageItems}=await import("./src/heif.js?v=0.7.0");
-    const {prepareLinearPixels}=await import("./src/linear-thumbnail.js?v=0.7.0");
-    const {irotAngleForItem,imirAxisForItem}=await import("./src/heif.js?v=0.7.0");
+    const {openHeicSource,prepareHeicAuxiliaries,prepareHeicLinearThumbnail,importRaster}=await import("./src/raster-import.js?v=0.7.1");
+    const {discoverHeic,discoverImageItems}=await import("./src/heif.js?v=0.7.1");
+    const {prepareLinearPixels}=await import("./src/linear-thumbnail.js?v=0.7.1");
+    const {irotAngleForItem,imirAxisForItem}=await import("./src/heif.js?v=0.7.1");
     const data=new Uint8Array(await (await fetch("/sample.heic")).arrayBuffer());
     const file=new File([data],"windows.heic",{type:"image/heic"}),d=discoverHeic(data);
     const saved={bitmap:globalThis.createImageBitmap,decode:Image.prototype.decode,decoder:globalThis.VideoDecoder,encoder:globalThis.VideoEncoder};
@@ -358,10 +360,13 @@ try {
     // before linearization to independently decoded tile values.
     for(let i=0;i<4;i++)assert.ok(Math.abs(result.linearCorners[i]/(result.floating?1:255)-samples[i].expected/255)<0.02,`linear source recovers stored orientation: ${result.linearCorners} vs ${samples.map(s=>s.expected)}, floating=${result.floating}`);
     assert.match(result.errors.auxiliary,/HEVC WebCodecs encoder unavailable/);
-    assert.match(result.errors.linear,/HEVC encoder unavailable/);
+    // The 10-bit path uses FFmpeg.wasm and this decoder-only server deliberately
+    // lacks cross-origin isolation; fail at that prerequisite before encoding.
+    assert.match(result.errors.linear,/FFmpeg\.wasm requires cross-origin isolation/);
     assert.match(result.errors.reencode,/HEVC WebCodecs encoder unavailable/);
     assert.ok(result.progress.some(e=>e.source==="libheif-js (asm.js)"));
-    assert.ok(result.progress.some(e=>e.source==="Image.decode()"&&e.decodeError));
+    assert.ok(result.progress.some(e=>e.source==="Image.decode()"));
+    assert.ok(result.progress.every(e=>!e.decodeError), 'native failure recovered by HEIC decoding is not a terminal decode failure');
     if(result.decoder==="auto")assert.ok(result.progress.some(e=>e.source==="libheif-js (asm.js)"&&/decoder unavailable/.test(e.fallbackReason)));
   }
   assert.equal(sourceBrowser.hits.asm,1,"software source fallback loads the pinned decoder only once");
@@ -372,7 +377,7 @@ try {
   assert.ok(!sourceFallback.neutralProgress.some(e=>e.operation==="decode"),"a neutral HDR map needs no photo decode");
 
   const asmSourceColor=await sourceBrowser.page.evaluate(async reference=>{
-    const {openHeicSource}=await import("./src/raster-import.js?v=0.7.0");
+    const {openHeicSource}=await import("./src/raster-import.js?v=0.7.1");
     const saved=globalThis.createImageBitmap,savedDecode=Image.prototype.decode;
     globalThis.createImageBitmap=async()=>{throw Error("native HEIC unsupported");};
     Image.prototype.decode=async()=>{throw Error("native HEIC unsupported");};
@@ -400,8 +405,17 @@ try {
 
   // Exercise the HEIC compatibility re-encode analysis route using a PNG native
   // input surface. Stop before encoding so this check needs no HEVC encoder.
-  const reencodeAnalysis=await real.page.evaluate(async()=>{
-    const {importRaster}=await import("./src/raster-import.js?v=0.7.0");
+  const reencodeAnalysis=await real.page.evaluate(async fixture=>{
+    const {importRaster}=await import("./src/raster-import.js?v=0.7.1");
+    // This case only tests decoding/analysis; seed our own codec assets so the
+    // re-encode preparation does not require an unrelated FFmpeg worker.
+    const {VERSION}=await import('./src/port.js');
+    const {generateSyntheticHevc}=await import(`./src/synthetic-hevc.js?v=${VERSION}`);
+    await generateSyntheticHevc(null,async(_pixels,options)=>{
+      const asset=options.pixelFormat!=='gray'?fixture.assets.delta
+        :options.width===768?fixture.assets.textureMask:fixture.assets.mask;
+      return {...asset,hvcc:new Uint8Array(asset.hvcc),payload:new Uint8Array(asset.payload)};
+    });
     const data=new Uint8Array(await (await fetch("/sample.heic")).arrayBuffer());
     const surface=document.createElement("canvas");surface.width=surface.height=64;
     const blob=await new Promise(resolve=>surface.toBlob(resolve,"image/png"));
@@ -423,7 +437,7 @@ try {
       }
     }finally{globalThis.VideoEncoder=nativeEncoder;globalThis.VideoDecoder=nativeDecoder;}
     return results;
-  });
+  },JSON.parse(fs.readFileSync(new URL('./synthetic-hevc.fixture.json',import.meta.url),'utf8')));
   for(const result of reencodeAnalysis) {
     assert.ok(result.progress.some(e=>e.stage==="analysis"));
     const sources=result.progress.filter(e=>e.stage==="codec").map(e=>e.source);
@@ -451,7 +465,7 @@ try {
       async flush(){} close(){this.state="closed";}
     };
     const data=new Uint8Array(await (await fetch("/sample.heic")).arrayBuffer());
-    const decoder=await import("./src/decode.js?v=0.7.0"),progress=[];
+    const decoder=await import("./src/decode.js?v=0.7.1"),progress=[];
     const onProgress=event=>progress.push(event);
     const web=await decoder.decodeToDisplayCanvas(data,{decoder:"auto",onProgress});
     const corners=[[8,8],[56,8],[8,56],[56,56]].map(([x,y])=>web.getContext("2d").getImageData(x,y,1,1).data[0]);
@@ -470,8 +484,8 @@ try {
   for(let i=0;i<4;i++)assert.ok(Math.abs(events.fallbackCorners[i]-events.corners[i])<=3);
   const iccBrowser=await context();
   const iccColors=await iccBrowser.page.evaluate(async pixels=>{
-    const {decodeToDisplayCanvas}=await import("./src/decode.js?v=0.7.0");
-    const {applyDecodedColorSpace}=await import("./src/webcodecs-color.js?v=0.7.0");
+    const {decodeToDisplayCanvas}=await import("./src/decode.js?v=0.7.1");
+    const {applyDecodedColorSpace}=await import("./src/webcodecs-color.js?v=0.7.1");
     const NativeDecoder=globalThis.VideoDecoder,progress=[],results=[],configs=[],diagnostics=[];
     let ignoreOverride=false,outputFormat="I420",wideGamut=false;
     globalThis.VideoDecoder=class {
@@ -514,7 +528,7 @@ try {
       globalThis.createImageBitmap=async()=>{throw Error("native HEIC unsupported");};
       Image.prototype.decode=async()=>{throw Error("native HEIC unsupported");};
       try {
-        const {openHeicSource}=await import("./src/raster-import.js?v=0.7.0");
+        const {openHeicSource}=await import("./src/raster-import.js?v=0.7.1");
         const opened=await openHeicSource(new File([data],"p3.heic"),data,{decoder:"auto",onProgress:e=>progress.push(e)});
         const canvas=await decodeToDisplayCanvas(data,{decoder:"webcodecs",outputColorSpace:"display-p3"});
         const srgb=await decodeToDisplayCanvas(data,{decoder:"webcodecs"});
@@ -567,9 +581,9 @@ try {
   assert.notDeepEqual(p3Matrices[0].actual,p3Matrices[1].actual,"colored samples must distinguish BT.709 from smpte170m");
   const grayBrowser=await context();
   const grayResults=await grayBrowser.page.evaluate(async()=>{
-    const {decodeImageItem,decodeToDisplayCanvas}=await import("./src/decode.js?v=0.7.0");
-    const {discoverHeic}=await import("./src/heif.js?v=0.7.0");
-    const {buildHeicInspection}=await import("./src/native-mattes.js?v=0.7.0");
+    const {decodeImageItem,decodeToDisplayCanvas}=await import("./src/decode.js?v=0.7.1");
+    const {discoverHeic}=await import("./src/heif.js?v=0.7.1");
+    const {buildHeicInspection}=await import("./src/native-mattes.js?v=0.7.1");
     const NativeDecoder=globalThis.VideoDecoder,events=[],results=[];
     let grid=false,count=0,format="I420";
     globalThis.VideoDecoder=class {
@@ -618,15 +632,15 @@ try {
   assert.ok(grayResults.events.some(e=>e.dataPreview&&e.colorProfile==="Gray Linear"));
   assert.ok(grayResults.events.some(e=>e.source==="libheif-js (asm.js)"&&/tone curve/.test(e.fallbackReason)));
   assert.equal(grayBrowser.hits.asm,1,"only the auto custom-profile case may load asm.js");
-  await real.page.selectOption("#decoder","auto");
   const english=await real.page.locator("#lang").getAttribute("data-i18n");assert.equal(english,"lang.name");
   await real.page.locator("#lang").click();
-  assert.match(await real.page.locator('option[value="auto"]').textContent(),/Auto/);
+  assert.match(await real.page.locator('[data-i18n="opt.quality"]').textContent(),/Analyze each photo/);
+  assert.equal(await real.page.locator("#decoder").count(),0);
   await real.page.locator("#lang").click();
   for(const width of [390,1440]) {
     await real.page.setViewportSize({width,height:1000});
     assert.ok(await real.page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
-    await real.page.locator(".decoder-settings").screenshot({path:path.join(dir,`settings-${width}.png`)});
+    await real.page.locator("#drop").screenshot({path:path.join(dir,`settings-${width}.png`)});
   }
   console.log(JSON.stringify({reference:expected,asm:actual.corners,auxiliary:actual.auxiliary,native:actual.native,controlledAuto:events.corners,scriptRequests:controlled.hits.asm,icc:iccColors.results,gray:grayResults.results}));
   console.log("120 orientation cases against real asm.js: both property orders, rotations/mirrors, square/rectangular grids, direct images, grayscale auxiliaries, stored masks/person coordinates/linear thumbnails/RGB analysis passed. Decoder selection, Windows native failure fallback, P3 gamut retention and ICC/YUV correction also passed.");

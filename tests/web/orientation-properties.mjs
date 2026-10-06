@@ -1,7 +1,7 @@
+import {generatedProfileFixture} from './profile-fixtures.mjs';
+import "./synthetic-fixtures.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { topBox, concat, be } from "../../web/src/box.js";
-import { loadProfile } from "../../web/src/zip.js";
 import {
   appendIpcoProperty, associateItemProperty, auxUriForItem, imirAxisForItem,
   parseIinf, parseIpcoIpma, propertyForItem, itemOrientation, setItemPropertyAssociations,
@@ -11,7 +11,7 @@ import { addTextureItems, MATTE_2026_URIS } from "../../web/src/texture.js";
 import {buildRasterHeic} from "../../web/src/raster-import.js";
 import {patch} from "../../web/src/port.js";
 
-const profile = await loadProfile(new Uint8Array(readFileSync("web/profiles/48-12.zip")));
+const profile = await generatedProfileFixture('48-12');
 const primary = Number(profile.manifest.donor_primary_item);
 let meta = profile.meta;
 assert.equal(propertyForItem(parseIpcoIpma(meta, topBox(meta, "meta")), primary, "imir"), null);
